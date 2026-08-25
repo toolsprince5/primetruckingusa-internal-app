@@ -2,6 +2,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  AppState,
   FlatList,
   KeyboardAvoidingView,
   Image,
@@ -21,7 +22,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import * as DocumentPicker from 'expo-document-picker';
 import MapView, { Marker } from 'react-native-maps';
-import { isSupabaseConfigured } from './src/lib/supabase';
+import { isSupabaseConfigured, supabase } from './src/lib/supabase';
 import {
   getOrCreateDirectThread,
   getRateConfirmationUrl,
@@ -43,6 +44,7 @@ import {
   createEmployeeInvite,
   completePasswordRecovery,
   requestPasswordReset,
+  restoreSessionProfile,
   loadActiveDispatchers,
   loadActiveDrivers,
   signIn,
@@ -123,6 +125,7 @@ export default function App() {
   const isLandscape = width > height;
   const [role, setRole] = useState<Role>('Driver');
   const [signedIn, setSignedIn] = useState(false);
+  const [restoringSession, setRestoringSession] = useState(isSupabaseConfigured);
   const [authenticatedProfile, setAuthenticatedProfile] = useState<Profile | null>(null);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -190,6 +193,42 @@ export default function App() {
     Linking.getInitialURL().then(openLink).catch(() => undefined);
     const listener = Linking.addEventListener('url', ({ url }) => openLink(url));
     return () => listener.remove();
+  }, []);
+
+  // Keep employees signed in until they deliberately choose Sign out from their
+  // profile menu. Sessions live in encrypted device storage and Supabase refreshes
+  // the access token while the app is active.
+  useEffect(() => {
+    const authClient = supabase;
+    if (!authClient) {
+      setRestoringSession(false);
+      return;
+    }
+    let active = true;
+    const restore = async () => {
+      try {
+        const profile = await restoreSessionProfile();
+        if (!active || !profile) return;
+        setAuthenticatedProfile(profile);
+        setRole(profile.role.charAt(0).toUpperCase() + profile.role.slice(1) as Role);
+        setSignedIn(true);
+      } catch {
+        // A missing or revoked session simply returns the employee to sign-in.
+      } finally {
+        if (active) setRestoringSession(false);
+      }
+    };
+    authClient.auth.startAutoRefresh();
+    void restore();
+    const appStateSubscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') authClient.auth.startAutoRefresh();
+      else authClient.auth.stopAutoRefresh();
+    });
+    return () => {
+      active = false;
+      appStateSubscription.remove();
+      authClient.auth.stopAutoRefresh();
+    };
   }, []);
 
   // Fetch once per sign-in so on-duty status survives switching screens instead
@@ -310,9 +349,9 @@ export default function App() {
 
             <View style={[styles.loginPanel, isLandscape && styles.loginPanelLandscape]}>
               <View style={styles.panelHandle} />
-              <Text style={styles.signInKicker}>{recoveryMode ? 'SECURE PASSWORD RESET' : inviteMode ? 'INVITED EMPLOYEE SETUP' : forgotMode ? 'PASSWORD RESET' : 'EMPLOYEE ACCESS'}</Text>
-              <Text style={styles.signInTitle}>{recoveryMode ? 'Choose a new password' : inviteMode ? 'Create your account' : forgotMode ? 'Reset your password' : 'Welcome back'}</Text>
-              <Text style={styles.signInHelp}>{recoveryMode ? 'Set a new password for your Prime Trucking USA employee account.' : inviteMode ? 'This one-time link is valid for eight hours. Your role has already been assigned by Prime Trucking USA.' : forgotMode ? 'Enter your work email. We will send a secure, one-time link to reset your password.' : 'Sign in with the account issued by Prime Trucking USA.'}</Text>
+              <Text style={styles.signInKicker}>{recoveryMode ? 'SECURE PASSWORD RESET' : inviteMode ? 'INVITED EMPLOYEE SETUP' : forgotMode ? 'PASSWORD RESET' : restoringSession ? 'RESTORING SECURE SESSION' : 'EMPLOYEE ACCESS'}</Text>
+              <Text style={styles.signInTitle}>{recoveryMode ? 'Choose a new password' : inviteMode ? 'Create your account' : forgotMode ? 'Reset your password' : restoringSession ? 'Opening your workspace' : 'Welcome back'}</Text>
+              <Text style={styles.signInHelp}>{recoveryMode ? 'Set a new password for your Prime Trucking USA employee account.' : inviteMode ? 'This one-time link is valid for eight hours. Your role has already been assigned by Prime Trucking USA.' : forgotMode ? 'Enter your work email. We will send a secure, one-time link to reset your password.' : restoringSession ? 'Checking your encrypted employee session.' : 'Sign in with the account issued by Prime Trucking USA.'}</Text>
               {recoveryMode ? <>
                 <View style={styles.fieldGroup}><Text style={styles.loginLabel}>NEW PASSWORD</Text><PasswordField value={recoveryPassword} onChangeText={setRecoveryPassword} placeholder="At least 12 characters" onSubmitEditing={saveRecoveryPassword} newPassword /></View>
                 <Pressable style={[styles.loginPrimary, savingRecoveryPassword && styles.buttonDisabled]} onPress={saveRecoveryPassword} disabled={savingRecoveryPassword} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{savingRecoveryPassword ? 'UPDATING PASSWORD…' : 'SAVE NEW PASSWORD'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
