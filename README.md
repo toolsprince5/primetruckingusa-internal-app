@@ -2,9 +2,9 @@
 
 This is the first cross-platform Expo/React Native build for the employee portal.
 
-## Included in the local demo
+## Included in the app
 
-- Role-specific demo sign-in for Driver, Dispatcher, and Admin.
+- Invite-only Driver and Dispatcher account setup. Each link is single-use, expires after eight hours, and carries the role defined by the administrator.
 - Role-based dashboards and limited messaging rules.
 - Load/rate-confirmation view using the supplied demo rate of $2,900.00.
 - Fuel receipt workflow using the supplied demo receipt value of $84.02.
@@ -27,7 +27,7 @@ Open the Expo Go app on an Android device to test the app. iPhone TestFlight dis
 
 ## Connected backend
 
-The Supabase project has been connected to the FlutterFlow project and now contains the protected application schema, private document buckets, role rules, live-update channels, and the three test roles:
+The Supabase project has the protected application schema, private document buckets, role rules, live-update channels, and the three test profiles:
 
 - Admin: `admin.test@primetruckingusa.com`
 - Dispatcher: `dispatch.test@primetruckingusa.com`
@@ -36,6 +36,14 @@ The Supabase project has been connected to the FlutterFlow project and now conta
 The SQL migrations are in `supabase/`. They are the source of truth for the production data model. Do not place a Supabase service-role key or any employee password in this repository.
 
 The Expo app now includes a secure Supabase client, secure mobile session storage, password sign-in, load/receipt service functions, and a Supabase Realtime subscription helper for messages. Add the public project URL and anon key through local `.env` or EAS build secrets; `.env.example` shows the required variable names. The user-facing app must never contain a service-role key.
+
+## Required before inviting employees
+
+1. Apply `supabase/009_invite_only_identity_and_data_boundaries.sql` in Supabase SQL Editor.
+2. Deploy `create-employee-invite` and `claim-employee-invite` Edge Functions.
+3. Set `RESEND_API_KEY` and `INVITE_FROM_EMAIL` as Edge Function secrets. Without those two settings, an Admin can still securely share the generated invite link from the app.
+4. In Supabase **Authentication → Providers → Email**, disable public sign-ups. Admin accounts remain owner-controlled; Drivers and Dispatchers are created only by the one-time invite function.
+5. Build a new Android/iOS app after applying the configuration above.
 
 ## Production integrations still required
 
