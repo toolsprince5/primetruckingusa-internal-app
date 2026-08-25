@@ -34,6 +34,27 @@ export async function signIn(email: string, password: string): Promise<Profile> 
   return getMyProfile(data.user.id);
 }
 
+/** Creates an account only after the server validates a one-time employee invite. */
+export async function claimEmployeeInvite(token: string, password: string) {
+  const { data, error } = await client().functions.invoke('claim-employee-invite', { body: { token, password } });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return data as { email: string; message: string };
+}
+
+export async function createEmployeeInvite(input: { email: string; fullName: string; role: 'driver' | 'dispatcher'; dispatcherId?: string }) {
+  const { data, error } = await client().functions.invoke('create-employee-invite', { body: input });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return data as { id: string; expiresAt: string; inviteUrl: string; emailed: boolean };
+}
+
+export async function loadActiveDispatchers() {
+  const { data, error } = await client().from('profiles').select('id, full_name, email, role').eq('role', 'dispatcher').eq('active', true).order('full_name');
+  if (error) throw error;
+  return (data ?? []) as Profile[];
+}
+
 export async function signOut() {
   const { error } = await client().auth.signOut();
   if (error) throw error;
