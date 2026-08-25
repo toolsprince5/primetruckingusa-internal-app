@@ -55,6 +55,12 @@ export async function loadActiveDispatchers() {
   return (data ?? []) as Profile[];
 }
 
+export async function loadActiveDrivers() {
+  const { data, error } = await client().from('profiles').select('id, full_name, email, role').eq('role', 'driver').eq('active', true).order('full_name');
+  if (error) throw error;
+  return (data ?? []) as Profile[];
+}
+
 export async function signOut() {
   const { error } = await client().auth.signOut();
   if (error) throw error;
@@ -65,6 +71,18 @@ export async function completePasswordRecovery(accessToken: string, refreshToken
   const { error: sessionError } = await client().auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
   if (sessionError) throw sessionError;
   const { error } = await client().auth.updateUser({ password });
+  if (error) throw error;
+}
+
+/**
+ * Sends a self-service password-reset email. Supabase issues the same generic
+ * response whether or not the address belongs to an account, so this never
+ * reveals which work emails exist.
+ */
+export async function requestPasswordReset(email: string) {
+  const { error } = await client().auth.resetPasswordForEmail(email, {
+    redirectTo: 'primetruckingusa://reset-password',
+  });
   if (error) throw error;
 }
 
@@ -160,13 +178,20 @@ export function subscribeToThread(threadId: string, onMessage: (message: AppMess
 }
 
 export async function getTrackingSettings(driverId: string) {
-  const { data, error } = await client().from('tracking_settings').select('driver_id, enabled, updated_at').eq('driver_id', driverId).maybeSingle();
+  const { data, error } = await client().from('tracking_settings').select('driver_id, enabled, on_duty, updated_at').eq('driver_id', driverId).maybeSingle();
   if (error) throw error;
-  return data ?? { driver_id: driverId, enabled: true, updated_at: null };
+  return data ?? { driver_id: driverId, enabled: true, on_duty: true, updated_at: null };
 }
 
+/** Admin-only override. Turning this off always wins over the driver's own duty status. */
 export async function setTrackingEnabled(driverId: string, enabled: boolean, updatedBy: string) {
   const { error } = await client().from('tracking_settings').upsert({ driver_id: driverId, enabled, updated_by: updatedBy, updated_at: new Date().toISOString() });
+  if (error) throw error;
+}
+
+/** A driver starting or ending their own workday. Cannot override an admin's tracking pause. */
+export async function setDriverDutyStatus(driverId: string, onDuty: boolean) {
+  const { error } = await client().from('tracking_settings').upsert({ driver_id: driverId, on_duty: onDuty, updated_at: new Date().toISOString() }, { onConflict: 'driver_id' });
   if (error) throw error;
 }
 
