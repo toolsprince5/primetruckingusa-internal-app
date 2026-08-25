@@ -1,0 +1,2 @@
+[functions.claim-employee-invite]
+verify_jwt = false
