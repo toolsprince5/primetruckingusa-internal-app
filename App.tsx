@@ -38,6 +38,7 @@ import {
   setTrackingEnabled,
   claimEmployeeInvite,
   createEmployeeInvite,
+  completePasswordRecovery,
   loadActiveDispatchers,
   signIn,
   signOut,
@@ -80,6 +81,11 @@ export default function App() {
   const [inviteToken, setInviteToken] = useState('');
   const [invitePassword, setInvitePassword] = useState('');
   const [claimingInvite, setClaimingInvite] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState(false);
+  const [recoveryAccessToken, setRecoveryAccessToken] = useState('');
+  const [recoveryRefreshToken, setRecoveryRefreshToken] = useState('');
+  const [recoveryPassword, setRecoveryPassword] = useState('');
+  const [savingRecoveryPassword, setSavingRecoveryPassword] = useState(false);
   const [screen, setScreen] = useState<Screen>('home');
   const [share, setShare] = useState(true);
   const [fuel, setFuel] = useState(84.02);
@@ -98,15 +104,30 @@ export default function App() {
     ? { name: authenticatedProfile.full_name || authenticatedProfile.role, email: authenticatedProfile.email }
     : { name: 'Employee', email: '' };
 
-  const openInvite = (url?: string | null) => {
-    const token = url ? url.match(/[?&]token=([^&]+)/)?.[1] : undefined;
-    if (token) setInviteToken(decodeURIComponent(token));
-    setInviteMode(true);
+  const openLink = (url?: string | null) => {
+    if (!url) return;
+    const token = url.match(/[?&]token=([^&]+)/)?.[1];
+    if (token) {
+      setRecoveryMode(false);
+      setInviteToken(decodeURIComponent(token));
+      setInviteMode(true);
+      return;
+    }
+    const fragment = url.split('#')[1] ?? '';
+    const params = new URLSearchParams(fragment);
+    const accessToken = params.get('access_token');
+    const refreshToken = params.get('refresh_token');
+    if (accessToken && refreshToken && params.get('type') === 'recovery') {
+      setInviteMode(false);
+      setRecoveryAccessToken(accessToken);
+      setRecoveryRefreshToken(refreshToken);
+      setRecoveryMode(true);
+    }
   };
 
   useEffect(() => {
-    Linking.getInitialURL().then(openInvite).catch(() => undefined);
-    const listener = Linking.addEventListener('url', ({ url }) => openInvite(url));
+    Linking.getInitialURL().then(openLink).catch(() => undefined);
+    const listener = Linking.addEventListener('url', ({ url }) => openLink(url));
     return () => listener.remove();
   }, []);
 
@@ -153,6 +174,21 @@ export default function App() {
     }
   };
 
+  const saveRecoveryPassword = async () => {
+    if (recoveryPassword.length < 12) return Alert.alert('Choose a stronger password', 'Your password must be at least 12 characters.');
+    setSavingRecoveryPassword(true);
+    try {
+      await completePasswordRecovery(recoveryAccessToken, recoveryRefreshToken, recoveryPassword);
+      setRecoveryPassword('');
+      setRecoveryMode(false);
+      Alert.alert('Password updated', 'Your password is ready. Sign in with your work email.');
+    } catch (error) {
+      Alert.alert('Password update failed', error instanceof Error ? error.message : 'Request a new password link and try again.');
+    } finally {
+      setSavingRecoveryPassword(false);
+    }
+  };
+
   const leaveApp = async () => {
     if (authenticatedProfile) {
       try { await signOut(); } catch { /* local UI can still return to sign-in if the network is unavailable */ }
@@ -186,10 +222,13 @@ export default function App() {
 
             <View style={styles.loginPanel}>
               <View style={styles.panelHandle} />
-              <Text style={styles.signInKicker}>{inviteMode ? 'INVITED EMPLOYEE SETUP' : 'EMPLOYEE ACCESS'}</Text>
-              <Text style={styles.signInTitle}>{inviteMode ? 'Create your account' : 'Welcome back'}</Text>
-              <Text style={styles.signInHelp}>{inviteMode ? 'This one-time link is valid for eight hours. Your role has already been assigned by Prime Trucking USA.' : 'Sign in with the account issued by Prime Trucking USA.'}</Text>
-              {inviteMode ? <>
+              <Text style={styles.signInKicker}>{recoveryMode ? 'SECURE PASSWORD RESET' : inviteMode ? 'INVITED EMPLOYEE SETUP' : 'EMPLOYEE ACCESS'}</Text>
+              <Text style={styles.signInTitle}>{recoveryMode ? 'Choose a new password' : inviteMode ? 'Create your account' : 'Welcome back'}</Text>
+              <Text style={styles.signInHelp}>{recoveryMode ? 'Set a new password for your Prime Trucking USA employee account.' : inviteMode ? 'This one-time link is valid for eight hours. Your role has already been assigned by Prime Trucking USA.' : 'Sign in with the account issued by Prime Trucking USA.'}</Text>
+              {recoveryMode ? <>
+                <View style={styles.fieldGroup}><Text style={styles.loginLabel}>NEW PASSWORD</Text><TextInput value={recoveryPassword} onChangeText={setRecoveryPassword} secureTextEntry placeholder="At least 12 characters" placeholderTextColor="#98A2B3" style={styles.loginInput} onSubmitEditing={saveRecoveryPassword} /></View>
+                <Pressable style={[styles.loginPrimary, savingRecoveryPassword && styles.buttonDisabled]} onPress={saveRecoveryPassword} disabled={savingRecoveryPassword} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{savingRecoveryPassword ? 'UPDATING PASSWORD…' : 'SAVE NEW PASSWORD'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
+              </> : inviteMode ? <>
                 <View style={styles.fieldGroup}><Text style={styles.loginLabel}>INVITE TOKEN</Text><TextInput value={inviteToken} onChangeText={setInviteToken} autoCapitalize="none" autoCorrect={false} placeholder="Paste the token from your invite link" placeholderTextColor="#98A2B3" style={styles.loginInput} /></View>
                 <View style={styles.fieldGroup}><Text style={styles.loginLabel}>CREATE PASSWORD</Text><TextInput value={invitePassword} onChangeText={setInvitePassword} secureTextEntry placeholder="At least 12 characters" placeholderTextColor="#98A2B3" style={styles.loginInput} onSubmitEditing={claimInvite} /></View>
                 <Pressable style={[styles.loginPrimary, claimingInvite && styles.buttonDisabled]} onPress={claimInvite} disabled={claimingInvite} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{claimingInvite ? 'CREATING ACCOUNT…' : 'CREATE SECURE ACCOUNT'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
@@ -200,7 +239,7 @@ export default function App() {
                 <Pressable style={[styles.loginPrimary, signingIn && styles.buttonDisabled]} onPress={productionSignIn} disabled={signingIn} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{signingIn ? 'SIGNING IN…' : 'SIGN IN TO PORTAL'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
               </>}
               <View style={styles.securityRow}><Text style={styles.securityDot}>●</Text><Text style={styles.securityText}>Secure, role-based employee access</Text></View>
-              {!inviteMode && <Pressable style={styles.previewToggle} onPress={() => openInvite()}><Text style={styles.previewToggleText}>Have an employee invite? Set up your account</Text><Text style={styles.previewToggleArrow}>→</Text></Pressable>}
+              {!inviteMode && !recoveryMode && <Pressable style={styles.previewToggle} onPress={() => setInviteMode(true)}><Text style={styles.previewToggleText}>Have an employee invite? Set up your account</Text><Text style={styles.previewToggleArrow}>→</Text></Pressable>}
               <Text style={styles.loginLegal}>By signing in, you agree to use this portal only for authorized Prime Trucking USA operations.</Text>
             </View>
           </ScrollView>
