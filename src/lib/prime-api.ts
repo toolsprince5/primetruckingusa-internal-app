@@ -60,6 +60,14 @@ export async function signOut() {
   if (error) throw error;
 }
 
+/** Completes a password-recovery session opened from the Prime Trucking USA app link. */
+export async function completePasswordRecovery(accessToken: string, refreshToken: string, password: string) {
+  const { error: sessionError } = await client().auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+  if (sessionError) throw sessionError;
+  const { error } = await client().auth.updateUser({ password });
+  if (error) throw error;
+}
+
 export async function getMyProfile(id: string): Promise<Profile> {
   const { data, error } = await client().from('profiles').select('id, full_name, email, role').eq('id', id).single();
   if (error) throw error;
