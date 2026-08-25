@@ -1,0 +1,11 @@
+node_modules/
+.expo/
+.eas-appdata/
+.eas-localappdata/
+.env
+.env.*
+!.env.example
+google-services.json
+dist/
+*.log
+*.rar
