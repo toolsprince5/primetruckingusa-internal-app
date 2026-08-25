@@ -2,6 +2,7 @@
   "expo": {
     "name": "Prime Trucking USA",
     "slug": "prime-trucking",
+    "scheme": "primetruckingusa",
     "owner": "primetruckingusas-team",
     "version": "0.1.0",
     "orientation": "portrait",
