@@ -2,8 +2,10 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  KeyboardAvoidingView,
   Image,
   Linking,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -75,6 +77,7 @@ export default function App() {
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [signingIn, setSigningIn] = useState(false);
+  const [showDemoAccess, setShowDemoAccess] = useState(false);
   const [screen, setScreen] = useState<Screen>('home');
   const [share, setShare] = useState(true);
   const [fuel, setFuel] = useState(84.02);
@@ -127,29 +130,57 @@ export default function App() {
 
   if (!signedIn) {
     return (
-      <SafeAreaView style={styles.safe}>
-        <StatusBar style="dark" />
-        <View style={styles.login}>
-          <Text style={styles.flag}>PRIME TRUCKING USA</Text>
-          <Text style={styles.brand}>Employee Portal</Text>
-          <Text style={styles.subtitle}>Dispatch. Drive. Deliver.</Text>
-          <Card>
-            <Text style={styles.label}>Secure employee sign-in</Text>
-            <TextInput value={loginEmail} onChangeText={setLoginEmail} autoCapitalize="none" keyboardType="email-address" placeholder="Email address" style={styles.fullInput} />
-            <TextInput value={loginPassword} onChangeText={setLoginPassword} secureTextEntry placeholder="Password" style={styles.fullInput} />
-            <Pressable style={styles.primary} onPress={productionSignIn} disabled={signingIn}><Text style={styles.primaryText}>{signingIn ? 'Signing in…' : 'Sign in securely'}</Text></Pressable>
-            <View style={styles.divider} />
-            <Text style={styles.label}>Preview as a role</Text>
-            {(Object.keys(demo) as Role[]).map((option) => (
-              <Pressable key={option} onPress={() => setRole(option)} style={[styles.roleButton, role === option && styles.roleSelected]}>
-                <Text style={[styles.roleText, role === option && styles.roleTextSelected]}>{option}</Text>
-                <Text style={[styles.roleEmail, role === option && styles.roleTextSelected]}>{demo[option].email}</Text>
-              </Pressable>
-            ))}
-            <Pressable style={styles.outline} onPress={() => setSignedIn(true)}><Text style={styles.outlineText}>Open selected preview</Text></Pressable>
-          </Card>
-          <Text style={styles.legal}>Prototype only. Production access will use invite-only accounts and secure password reset.</Text>
-        </View>
+      <SafeAreaView style={styles.loginSafe}>
+        <StatusBar style="light" />
+        <KeyboardAvoidingView style={styles.loginShell} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            <View style={styles.loginHero}>
+              <View style={styles.heroRule} />
+              <View style={styles.logoLockup} accessibilityLabel="Prime Trucking USA">
+                <Text style={styles.logoPrime}>PRIME</Text>
+                <View style={styles.logoRedLine} />
+                <Text style={styles.logoTrucking}>TRUCKING</Text>
+                <Text style={styles.logoUsa}>USA</Text>
+              </View>
+              <View style={styles.trustChip}><Text style={styles.trustChipText}>🇺🇸  LICENSED · INSURED · FMCSA REGISTERED</Text></View>
+              <Text style={styles.loginHeading}>Your operations,{`\n`}always in motion.</Text>
+              <Text style={styles.loginLead}>Secure access for Prime drivers, dispatchers, and administrators.</Text>
+              <View style={styles.heroChecks}>
+                <Text style={styles.heroCheck}>●  24/7 Dispatch</Text>
+                <Text style={styles.heroCheck}>●  Live Load Visibility</Text>
+              </View>
+            </View>
+
+            <View style={styles.loginPanel}>
+              <View style={styles.panelHandle} />
+              <Text style={styles.signInKicker}>EMPLOYEE ACCESS</Text>
+              <Text style={styles.signInTitle}>Welcome back</Text>
+              <Text style={styles.signInHelp}>Sign in with the account issued by Prime Trucking USA.</Text>
+              <View style={styles.fieldGroup}>
+                <Text style={styles.loginLabel}>WORK EMAIL</Text>
+                <TextInput value={loginEmail} onChangeText={setLoginEmail} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" placeholder="name@primetruckingusa.com" placeholderTextColor="#98A2B3" style={styles.loginInput} />
+              </View>
+              <View style={styles.fieldGroup}>
+                <View style={styles.fieldLabelRow}><Text style={styles.loginLabel}>PASSWORD</Text><Pressable onPress={() => Alert.alert('Password help', 'Contact your administrator to reset your employee password.')}><Text style={styles.forgot}>Need help?</Text></Pressable></View>
+                <TextInput value={loginPassword} onChangeText={setLoginPassword} secureTextEntry placeholder="Enter your password" placeholderTextColor="#98A2B3" style={styles.loginInput} onSubmitEditing={productionSignIn} />
+              </View>
+              <Pressable style={[styles.loginPrimary, signingIn && styles.buttonDisabled]} onPress={productionSignIn} disabled={signingIn} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{signingIn ? 'SIGNING IN…' : 'SIGN IN TO PORTAL'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
+              <View style={styles.securityRow}><Text style={styles.securityDot}>●</Text><Text style={styles.securityText}>Secure, role-based employee access</Text></View>
+
+              <Pressable style={styles.previewToggle} onPress={() => setShowDemoAccess((current) => !current)}><Text style={styles.previewToggleText}>{showDemoAccess ? 'Hide testing access' : 'Testing the app? Open role preview'}</Text><Text style={styles.previewToggleArrow}>{showDemoAccess ? '⌃' : '⌄'}</Text></Pressable>
+              {showDemoAccess && <View style={styles.previewArea}>
+                <Text style={styles.previewTitle}>SELECT A DEMO ROLE</Text>
+                {(Object.keys(demo) as Role[]).map((option) => (
+                  <Pressable key={option} onPress={() => setRole(option)} style={[styles.roleButton, role === option && styles.roleSelected]}>
+                    <View><Text style={[styles.roleText, role === option && styles.roleTextSelected]}>{option}</Text><Text style={[styles.roleEmail, role === option && styles.roleTextSelected]}>{demo[option].email}</Text></View><Text style={[styles.roleArrow, role === option && styles.roleTextSelected]}>→</Text>
+                  </Pressable>
+                ))}
+                <Pressable style={styles.previewOpen} onPress={() => setSignedIn(true)}><Text style={styles.previewOpenText}>OPEN {role.toUpperCase()} PREVIEW</Text></Pressable>
+              </View>}
+              <Text style={styles.loginLegal}>By signing in, you agree to use this portal only for authorized Prime Trucking USA operations.</Text>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     );
   }
@@ -277,5 +308,53 @@ function Settings({ role, share, setShare }: { role: Role; share: boolean; setSh
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: MIST }, login: { flex: 1, padding: 24, justifyContent: 'center' }, flag: { color: RED, fontSize: 12, fontWeight: '900', letterSpacing: 2 }, brand: { color: NAVY, fontSize: 34, fontWeight: '900', marginTop: 6 }, subtitle: { color: '#5E6C84', fontSize: 16, marginBottom: 28 }, header: { backgroundColor: 'white', borderBottomWidth: 1, borderColor: '#E6EAF0', paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, headerBrand: { color: RED, fontWeight: '900', letterSpacing: 2, fontSize: 20 }, headerSub: { color: NAVY, fontSize: 9, fontWeight: '800', letterSpacing: 1.5 }, profile: { backgroundColor: NAVY, color: 'white', width: 34, height: 34, textAlign: 'center', lineHeight: 34, borderRadius: 17, fontWeight: '800' }, content: { padding: 18, gap: 14, paddingBottom: 22 }, eyebrow: { color: RED, letterSpacing: 1.5, fontSize: 11, fontWeight: '900' }, title: { fontSize: 28, color: INK, fontWeight: '900', marginBottom: 2 }, card: { backgroundColor: 'white', borderRadius: 16, padding: 16, gap: 9, shadowColor: '#1F2933', shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 }, cardTitle: { color: INK, fontSize: 15, fontWeight: '800' }, big: { color: NAVY, fontSize: 21, fontWeight: '900' }, amount: { color: NAVY, fontSize: 30, fontWeight: '900' }, muted: { color: '#667085', fontSize: 13, lineHeight: 19 }, body: { color: INK, fontSize: 14, lineHeight: 21 }, smallBold: { color: INK, fontWeight: '800', fontSize: 14 }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, line: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, paddingVertical: 4 }, divider: { height: 1, backgroundColor: '#E8EDF3', marginVertical: 5 }, pill: { overflow: 'hidden', color: '#145DA0', backgroundColor: '#E5F1FB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: '800' }, greenPill: { color: '#087443', backgroundColor: '#E2F7EC' }, redPill: { color: '#9F1724', backgroundColor: '#FDE8EA' }, primary: { backgroundColor: RED, padding: 14, borderRadius: 10, alignItems: 'center', marginTop: 3 }, primaryText: { color: 'white', fontWeight: '800' }, outline: { borderWidth: 1, borderColor: NAVY, padding: 12, borderRadius: 10, alignItems: 'center', marginTop: 5 }, outlineText: { color: NAVY, fontWeight: '800' }, danger: { backgroundColor: '#FDE8EA', padding: 13, borderRadius: 10, alignItems: 'center', marginTop: 4 }, dangerText: { color: '#9F1724', fontWeight: '800' }, roleButton: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 10, padding: 12, gap: 2 }, roleSelected: { backgroundColor: NAVY, borderColor: NAVY }, roleText: { color: INK, fontWeight: '800' }, roleEmail: { color: '#667085', fontSize: 12 }, roleTextSelected: { color: 'white' }, label: { color: '#344054', fontSize: 13, fontWeight: '700' }, legal: { color: '#667085', fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }, link: { color: RED, fontWeight: '800', marginTop: 5 }, grid: { flexDirection: 'row', gap: 12 }, action: { flex: 1, backgroundColor: 'white', padding: 15, borderRadius: 16, minHeight: 112, justifyContent: 'space-between' }, actionIcon: { color: RED, fontSize: 25, fontWeight: '900' }, actionText: { color: NAVY, fontWeight: '800', fontSize: 13 }, bubble: { padding: 11, borderRadius: 12, color: INK, fontSize: 13, lineHeight: 18 }, driverBubble: { backgroundColor: '#E8F0FA', alignSelf: 'flex-end' }, dispatchBubble: { backgroundColor: '#F2F4F7', alignSelf: 'flex-start' }, compose: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8 }, input: { flex: 1, borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: INK }, send: { backgroundColor: RED, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 11 }, notice: { color: '#667085', fontSize: 12, lineHeight: 18, paddingHorizontal: 4 }, fullInput: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, padding: 11, fontSize: 16, color: INK }, uploadPreview: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#E8EDF3' }, check: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, checkMark: { color: '#087443', fontSize: 18, fontWeight: '900' }, map: { height: 230, borderRadius: 12, overflow: 'hidden' }, nav: { flexDirection: 'row', backgroundColor: 'white', borderTopWidth: 1, borderColor: '#E6EAF0', paddingVertical: 10 }, navItem: { flex: 1, alignItems: 'center' }, navText: { color: '#667085', fontSize: 11, fontWeight: '700' }, navActive: { color: RED, fontWeight: '900' }
+  safe: { flex: 1, backgroundColor: MIST },
+  loginSafe: { flex: 1, backgroundColor: NAVY },
+  loginShell: { flex: 1 },
+  loginScroll: { flexGrow: 1, backgroundColor: NAVY },
+  loginHero: { minHeight: 334, paddingHorizontal: 25, paddingTop: 25, paddingBottom: 30, overflow: 'hidden', backgroundColor: NAVY },
+  heroRule: { position: 'absolute', right: -70, top: 56, height: 220, width: 220, borderWidth: 28, borderColor: '#213E6C', borderRadius: 130, opacity: 0.72 },
+  logoLockup: { alignSelf: 'flex-start', backgroundColor: 'white', paddingHorizontal: 10, paddingTop: 5, paddingBottom: 7, minWidth: 112, borderRadius: 2, elevation: 4 },
+  logoPrime: { color: '#123C79', fontWeight: '900', fontSize: 18, letterSpacing: 0.5, lineHeight: 19 },
+  logoRedLine: { backgroundColor: RED, height: 3, width: '100%', marginVertical: 2 },
+  logoTrucking: { color: RED, fontWeight: '900', fontSize: 13, letterSpacing: 0.7, lineHeight: 15 },
+  logoUsa: { position: 'absolute', right: 6, bottom: -17, color: '#123C79', fontWeight: '900', fontSize: 13, fontStyle: 'italic' },
+  trustChip: { alignSelf: 'flex-start', marginTop: 37, borderWidth: 1.5, borderColor: RED, borderRadius: 99, paddingHorizontal: 11, paddingVertical: 6, backgroundColor: 'rgba(16,42,67,0.46)' },
+  trustChipText: { color: 'white', fontSize: 10, lineHeight: 13, fontWeight: '800', letterSpacing: 0.2 },
+  loginHeading: { color: 'white', fontSize: 33, lineHeight: 37, fontWeight: '900', letterSpacing: -0.8, marginTop: 14, maxWidth: 350 },
+  loginLead: { color: '#D5E1F2', fontSize: 14, lineHeight: 20, marginTop: 10, maxWidth: 320 },
+  heroChecks: { flexDirection: 'row', flexWrap: 'wrap', gap: 13, marginTop: 19 },
+  heroCheck: { color: 'white', fontSize: 11, fontWeight: '800' },
+  loginPanel: { backgroundColor: 'white', borderTopLeftRadius: 29, borderTopRightRadius: 29, marginTop: -20, paddingHorizontal: 24, paddingTop: 13, paddingBottom: 29, minHeight: 480 },
+  panelHandle: { width: 38, height: 4, borderRadius: 2, backgroundColor: '#D9E1EC', alignSelf: 'center', marginBottom: 20 },
+  signInKicker: { color: RED, fontSize: 11, fontWeight: '900', letterSpacing: 1.55 },
+  signInTitle: { color: INK, fontSize: 28, fontWeight: '900', letterSpacing: -0.5, marginTop: 5 },
+  signInHelp: { color: '#667085', fontSize: 13, lineHeight: 19, marginTop: 5, marginBottom: 20 },
+  fieldGroup: { marginBottom: 15 },
+  fieldLabelRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 7 },
+  loginLabel: { color: NAVY, fontSize: 10, fontWeight: '900', letterSpacing: 1.05, marginBottom: 7 },
+  forgot: { color: RED, fontSize: 12, fontWeight: '800' },
+  loginInput: { height: 50, backgroundColor: '#F7F9FC', borderWidth: 1, borderColor: '#DCE4EF', borderRadius: 9, paddingHorizontal: 14, color: INK, fontSize: 15 },
+  loginPrimary: { backgroundColor: RED, minHeight: 53, borderRadius: 7, paddingHorizontal: 17, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 3, shadowColor: RED, shadowOpacity: 0.24, shadowRadius: 10, elevation: 3 },
+  buttonDisabled: { opacity: 0.7 },
+  loginPrimaryText: { color: 'white', fontSize: 12, fontWeight: '900', letterSpacing: 0.7 },
+  loginArrow: { color: 'white', fontSize: 21, fontWeight: '700' },
+  securityRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 13 },
+  securityDot: { color: '#12B76A', fontSize: 9 },
+  securityText: { color: '#667085', fontSize: 11, fontWeight: '600' },
+  previewToggle: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderTopColor: '#E8EDF3', marginTop: 24, paddingTop: 17, paddingBottom: 2 },
+  previewToggleText: { color: NAVY, fontSize: 12, fontWeight: '800' },
+  previewToggleArrow: { color: RED, fontSize: 18, fontWeight: '900' },
+  previewArea: { gap: 8, marginTop: 14 },
+  previewTitle: { color: '#667085', fontWeight: '900', fontSize: 10, letterSpacing: 1, marginBottom: 2 },
+  roleButton: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 12, paddingVertical: 10, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  roleSelected: { backgroundColor: NAVY, borderColor: NAVY },
+  roleText: { color: INK, fontWeight: '800', fontSize: 13 },
+  roleEmail: { color: '#667085', fontSize: 11, marginTop: 2 },
+  roleArrow: { color: RED, fontSize: 17, fontWeight: '800' },
+  roleTextSelected: { color: 'white' },
+  previewOpen: { backgroundColor: '#EAF0F8', padding: 13, borderRadius: 8, alignItems: 'center', marginTop: 2 },
+  previewOpenText: { color: NAVY, fontSize: 11, fontWeight: '900', letterSpacing: 0.55 },
+  loginLegal: { color: '#98A2B3', fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 22, paddingHorizontal: 8 },
+  header: { backgroundColor: 'white', borderBottomWidth: 1, borderColor: '#E6EAF0', paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, headerBrand: { color: RED, fontWeight: '900', letterSpacing: 2, fontSize: 20 }, headerSub: { color: NAVY, fontSize: 9, fontWeight: '800', letterSpacing: 1.5 }, profile: { backgroundColor: NAVY, color: 'white', width: 34, height: 34, textAlign: 'center', lineHeight: 34, borderRadius: 17, fontWeight: '800' }, content: { padding: 18, gap: 14, paddingBottom: 22 }, eyebrow: { color: RED, letterSpacing: 1.5, fontSize: 11, fontWeight: '900' }, title: { fontSize: 28, color: INK, fontWeight: '900', marginBottom: 2 }, card: { backgroundColor: 'white', borderRadius: 16, padding: 16, gap: 9, shadowColor: '#1F2933', shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 }, cardTitle: { color: INK, fontSize: 15, fontWeight: '800' }, big: { color: NAVY, fontSize: 21, fontWeight: '900' }, amount: { color: NAVY, fontSize: 30, fontWeight: '900' }, muted: { color: '#667085', fontSize: 13, lineHeight: 19 }, body: { color: INK, fontSize: 14, lineHeight: 21 }, smallBold: { color: INK, fontWeight: '800', fontSize: 14 }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, line: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, paddingVertical: 4 }, divider: { height: 1, backgroundColor: '#E8EDF3', marginVertical: 5 }, pill: { overflow: 'hidden', color: '#145DA0', backgroundColor: '#E5F1FB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: '800' }, greenPill: { color: '#087443', backgroundColor: '#E2F7EC' }, redPill: { color: '#9F1724', backgroundColor: '#FDE8EA' }, primary: { backgroundColor: RED, padding: 14, borderRadius: 10, alignItems: 'center', marginTop: 3 }, primaryText: { color: 'white', fontWeight: '800' }, outline: { borderWidth: 1, borderColor: NAVY, padding: 12, borderRadius: 10, alignItems: 'center', marginTop: 5 }, outlineText: { color: NAVY, fontWeight: '800' }, danger: { backgroundColor: '#FDE8EA', padding: 13, borderRadius: 10, alignItems: 'center', marginTop: 4 }, dangerText: { color: '#9F1724', fontWeight: '800' }, label: { color: '#344054', fontSize: 13, fontWeight: '700' }, legal: { color: '#667085', fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }, link: { color: RED, fontWeight: '800', marginTop: 5 }, grid: { flexDirection: 'row', gap: 12 }, action: { flex: 1, backgroundColor: 'white', padding: 15, borderRadius: 16, minHeight: 112, justifyContent: 'space-between' }, actionIcon: { color: RED, fontSize: 25, fontWeight: '900' }, actionText: { color: NAVY, fontWeight: '800', fontSize: 13 }, bubble: { padding: 11, borderRadius: 12, color: INK, fontSize: 13, lineHeight: 18 }, driverBubble: { backgroundColor: '#E8F0FA', alignSelf: 'flex-end' }, dispatchBubble: { backgroundColor: '#F2F4F7', alignSelf: 'flex-start' }, compose: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8 }, input: { flex: 1, borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: INK }, send: { backgroundColor: RED, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 11 }, notice: { color: '#667085', fontSize: 12, lineHeight: 18, paddingHorizontal: 4 }, fullInput: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, padding: 11, fontSize: 16, color: INK }, uploadPreview: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#E8EDF3' }, check: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, checkMark: { color: '#087443', fontSize: 18, fontWeight: '900' }, map: { height: 230, borderRadius: 12, overflow: 'hidden' }, nav: { flexDirection: 'row', backgroundColor: 'white', borderTopWidth: 1, borderColor: '#E6EAF0', paddingVertical: 10 }, navItem: { flex: 1, alignItems: 'center' }, navText: { color: '#667085', fontSize: 11, fontWeight: '700' }, navActive: { color: RED, fontWeight: '900' }
 });
