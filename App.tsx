@@ -8,6 +8,7 @@ import {
   Platform,
   Pressable,
   SafeAreaView,
+  Share,
   ScrollView,
   StyleSheet,
   Text,
@@ -35,6 +36,9 @@ import {
   saveReceipt,
   sendThreadMessage,
   setTrackingEnabled,
+  claimEmployeeInvite,
+  createEmployeeInvite,
+  loadActiveDispatchers,
   signIn,
   signOut,
   submitInspection,
@@ -54,12 +58,6 @@ const NAVY = color.brand.navy;
 const INK = color.neutral[900];
 const MIST = color.neutral[100];
 
-const demo = {
-  Driver: { name: 'Driver', email: 'driver.test@primetruckingusa.com' },
-  Dispatcher: { name: 'Dispatcher', email: 'dispatch.test@primetruckingusa.com' },
-  Admin: { name: 'Admin', email: 'admin.test@primetruckingusa.com' },
-} satisfies Record<Role, { name: string; email: string }>;
-
 const money = (amount: number) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
 
@@ -78,7 +76,10 @@ export default function App() {
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [signingIn, setSigningIn] = useState(false);
-  const [showDemoAccess, setShowDemoAccess] = useState(false);
+  const [inviteMode, setInviteMode] = useState(false);
+  const [inviteToken, setInviteToken] = useState('');
+  const [invitePassword, setInvitePassword] = useState('');
+  const [claimingInvite, setClaimingInvite] = useState(false);
   const [screen, setScreen] = useState<Screen>('home');
   const [share, setShare] = useState(true);
   const [fuel, setFuel] = useState(84.02);
@@ -95,7 +96,19 @@ export default function App() {
   const takeHome = net * ((Number(percentage) || 0) / 100);
   const person = authenticatedProfile
     ? { name: authenticatedProfile.full_name || authenticatedProfile.role, email: authenticatedProfile.email }
-    : demo[role];
+    : { name: 'Employee', email: '' };
+
+  const openInvite = (url?: string | null) => {
+    const token = url ? url.match(/[?&]token=([^&]+)/)?.[1] : undefined;
+    if (token) setInviteToken(decodeURIComponent(token));
+    setInviteMode(true);
+  };
+
+  useEffect(() => {
+    Linking.getInitialURL().then(openInvite).catch(() => undefined);
+    const listener = Linking.addEventListener('url', ({ url }) => openInvite(url));
+    return () => listener.remove();
+  }, []);
 
   const sendMessage = () => {
     if (!message.trim()) return;
@@ -118,6 +131,25 @@ export default function App() {
       Alert.alert('Sign-in failed', error instanceof Error ? error.message : 'Please check your login details and try again.');
     } finally {
       setSigningIn(false);
+    }
+  };
+
+  const claimInvite = async () => {
+    if (!inviteToken || !invitePassword) return Alert.alert('Complete account setup', 'Open your invite link and choose a password of at least 12 characters.');
+    if (invitePassword.length < 12) return Alert.alert('Choose a stronger password', 'Your password must be at least 12 characters.');
+    setClaimingInvite(true);
+    try {
+      const result = await claimEmployeeInvite(inviteToken.trim(), invitePassword);
+      setLoginEmail(result.email);
+      setLoginPassword('');
+      setInvitePassword('');
+      setInviteToken('');
+      setInviteMode(false);
+      Alert.alert('Account ready', 'Your account has been set up. Sign in with your work email and the password you just created.');
+    } catch (error) {
+      Alert.alert('Invite unavailable', error instanceof Error ? error.message : 'This invite may have expired or already been used.');
+    } finally {
+      setClaimingInvite(false);
     }
   };
 
@@ -154,30 +186,21 @@ export default function App() {
 
             <View style={styles.loginPanel}>
               <View style={styles.panelHandle} />
-              <Text style={styles.signInKicker}>EMPLOYEE ACCESS</Text>
-              <Text style={styles.signInTitle}>Welcome back</Text>
-              <Text style={styles.signInHelp}>Sign in with the account issued by Prime Trucking USA.</Text>
-              <View style={styles.fieldGroup}>
-                <Text style={styles.loginLabel}>WORK EMAIL</Text>
-                <TextInput value={loginEmail} onChangeText={setLoginEmail} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" placeholder="name@primetruckingusa.com" placeholderTextColor="#98A2B3" style={styles.loginInput} />
-              </View>
-              <View style={styles.fieldGroup}>
-                <View style={styles.fieldLabelRow}><Text style={styles.loginLabel}>PASSWORD</Text><Pressable onPress={() => Alert.alert('Password help', 'Contact your administrator to reset your employee password.')}><Text style={styles.forgot}>Need help?</Text></Pressable></View>
-                <TextInput value={loginPassword} onChangeText={setLoginPassword} secureTextEntry placeholder="Enter your password" placeholderTextColor="#98A2B3" style={styles.loginInput} onSubmitEditing={productionSignIn} />
-              </View>
-              <Pressable style={[styles.loginPrimary, signingIn && styles.buttonDisabled]} onPress={productionSignIn} disabled={signingIn} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{signingIn ? 'SIGNING IN…' : 'SIGN IN TO PORTAL'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
+              <Text style={styles.signInKicker}>{inviteMode ? 'INVITED EMPLOYEE SETUP' : 'EMPLOYEE ACCESS'}</Text>
+              <Text style={styles.signInTitle}>{inviteMode ? 'Create your account' : 'Welcome back'}</Text>
+              <Text style={styles.signInHelp}>{inviteMode ? 'This one-time link is valid for eight hours. Your role has already been assigned by Prime Trucking USA.' : 'Sign in with the account issued by Prime Trucking USA.'}</Text>
+              {inviteMode ? <>
+                <View style={styles.fieldGroup}><Text style={styles.loginLabel}>INVITE TOKEN</Text><TextInput value={inviteToken} onChangeText={setInviteToken} autoCapitalize="none" autoCorrect={false} placeholder="Paste the token from your invite link" placeholderTextColor="#98A2B3" style={styles.loginInput} /></View>
+                <View style={styles.fieldGroup}><Text style={styles.loginLabel}>CREATE PASSWORD</Text><TextInput value={invitePassword} onChangeText={setInvitePassword} secureTextEntry placeholder="At least 12 characters" placeholderTextColor="#98A2B3" style={styles.loginInput} onSubmitEditing={claimInvite} /></View>
+                <Pressable style={[styles.loginPrimary, claimingInvite && styles.buttonDisabled]} onPress={claimInvite} disabled={claimingInvite} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{claimingInvite ? 'CREATING ACCOUNT…' : 'CREATE SECURE ACCOUNT'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
+                <Pressable style={styles.previewToggle} onPress={() => setInviteMode(false)}><Text style={styles.previewToggleText}>Already have an account? Sign in</Text></Pressable>
+              </> : <>
+                <View style={styles.fieldGroup}><Text style={styles.loginLabel}>WORK EMAIL</Text><TextInput value={loginEmail} onChangeText={setLoginEmail} autoCapitalize="none" autoCorrect={false} keyboardType="email-address" placeholder="name@primetruckingusa.com" placeholderTextColor="#98A2B3" style={styles.loginInput} /></View>
+                <View style={styles.fieldGroup}><View style={styles.fieldLabelRow}><Text style={styles.loginLabel}>PASSWORD</Text><Pressable onPress={() => Alert.alert('Password help', 'Contact your administrator to reset your employee password.')}><Text style={styles.forgot}>Need help?</Text></Pressable></View><TextInput value={loginPassword} onChangeText={setLoginPassword} secureTextEntry placeholder="Enter your password" placeholderTextColor="#98A2B3" style={styles.loginInput} onSubmitEditing={productionSignIn} /></View>
+                <Pressable style={[styles.loginPrimary, signingIn && styles.buttonDisabled]} onPress={productionSignIn} disabled={signingIn} accessibilityRole="button"><Text style={styles.loginPrimaryText}>{signingIn ? 'SIGNING IN…' : 'SIGN IN TO PORTAL'}</Text><Text style={styles.loginArrow}>→</Text></Pressable>
+              </>}
               <View style={styles.securityRow}><Text style={styles.securityDot}>●</Text><Text style={styles.securityText}>Secure, role-based employee access</Text></View>
-
-              <Pressable style={styles.previewToggle} onPress={() => setShowDemoAccess((current) => !current)}><Text style={styles.previewToggleText}>{showDemoAccess ? 'Hide testing access' : 'Testing the app? Open role preview'}</Text><Text style={styles.previewToggleArrow}>{showDemoAccess ? '⌃' : '⌄'}</Text></Pressable>
-              {showDemoAccess && <View style={styles.previewArea}>
-                <Text style={styles.previewTitle}>SELECT A DEMO ROLE</Text>
-                {(Object.keys(demo) as Role[]).map((option) => (
-                  <Pressable key={option} onPress={() => setRole(option)} style={[styles.roleButton, role === option && styles.roleSelected]}>
-                    <View><Text style={[styles.roleText, role === option && styles.roleTextSelected]}>{option}</Text><Text style={[styles.roleEmail, role === option && styles.roleTextSelected]}>{demo[option].email}</Text></View><Text style={[styles.roleArrow, role === option && styles.roleTextSelected]}>→</Text>
-                  </Pressable>
-                ))}
-                <Pressable style={styles.previewOpen} onPress={() => setSignedIn(true)}><Text style={styles.previewOpenText}>OPEN {role.toUpperCase()} PREVIEW</Text></Pressable>
-              </View>}
+              {!inviteMode && <Pressable style={styles.previewToggle} onPress={() => openInvite()}><Text style={styles.previewToggleText}>Have an employee invite? Set up your account</Text><Text style={styles.previewToggleArrow}>→</Text></Pressable>}
               <Text style={styles.loginLegal}>By signing in, you agree to use this portal only for authorized Prime Trucking USA operations.</Text>
             </View>
           </ScrollView>
@@ -322,9 +345,46 @@ function Tracking({ role, profile, share, setShare, locationLabel, setLocationLa
   return <><Text style={styles.eyebrow}>{role === 'Driver' ? 'YOUR LOCATION' : 'FLEET VISIBILITY'}</Text><Text style={styles.title}>{role === 'Driver' ? 'Live tracking' : 'Driver map'}</Text><Card><MapView style={styles.map} region={{ ...locationCoords, latitudeDelta: 0.16, longitudeDelta: 0.16 }}><Marker coordinate={locationCoords} title="Prime Trucking USA driver" description={locationLabel} pinColor={RED} /></MapView><View style={styles.row}><View><Text style={styles.cardTitle}>{share ? 'Tracking is active' : 'Tracking paused'}</Text><Text style={styles.muted}>{role === 'Driver' ? 'Your dispatcher can see your location while you are on duty.' : locationLabel}</Text></View><Pill tone={share ? 'green' : 'red'}>{share ? 'Live' : 'Off'}</Pill></View></Card>{share && role === 'Driver' && <Pressable style={styles.primary} onPress={refreshLocation}><Text style={styles.primaryText}>REFRESH CURRENT LOCATION</Text></Pressable>}{role === 'Admin' && <Pressable style={share ? styles.danger : styles.primary} onPress={toggle}><Text style={share ? styles.dangerText : styles.primaryText}>{share ? 'Turn off driver tracking' : 'Turn on driver tracking'}</Text></Pressable>}<Text style={styles.notice}>Location is shown clearly and transparently. Admins can pause tracking when required.</Text></>;
 }
 
-function Settings({ role, share, setShare }: { role: Role; share: boolean; setShare: (enabled: boolean) => void }) { if (role !== 'Admin') return <Text style={styles.title}>Settings available to admins only.</Text>; return <><Text style={styles.title}>Admin Controls</Text><Card><Text style={styles.cardTitle}>Demo employee access</Text>{(['Admin', 'Dispatcher', 'Driver'] as Role[]).map((item) => <View key={item} style={styles.line}><View><Text style={styles.smallBold}>{item}</Text><Text style={styles.muted}>{demo[item].email}</Text></View><Pill>{item}</Pill></View>)}</Card><Card><Text style={styles.cardTitle}>Tracking control</Text><Text style={styles.muted}>Driver tracking is currently {share ? 'enabled' : 'disabled'}.</Text><Pressable style={share ? styles.danger : styles.primary} onPress={() => setShare(!share)}><Text style={share ? styles.dangerText : styles.primaryText}>{share ? 'Disable tracking' : 'Enable tracking'}</Text></Pressable></Card></>;
+function Settings({ role, share, setShare }: { role: Role; share: boolean; setShare: (enabled: boolean) => void }) {
+  if (role !== 'Admin') return <Text style={styles.title}>Settings available to admins only.</Text>;
+  return <><Text style={styles.title}>Admin Controls</Text><InviteManager /><Card><Text style={styles.cardTitle}>Tracking control</Text><Text style={styles.muted}>Driver tracking is currently {share ? 'enabled' : 'disabled'}.</Text><Pressable style={share ? styles.danger : styles.primary} onPress={() => setShare(!share)}><Text style={share ? styles.dangerText : styles.primaryText}>{share ? 'Disable tracking' : 'Enable tracking'}</Text></Pressable></Card></>;
 }
 
+function InviteManager() {
+  const [fullName, setFullName] = useState('');
+  const [email, setEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<'driver' | 'dispatcher'>('driver');
+  const [dispatchers, setDispatchers] = useState<Profile[]>([]);
+  const [dispatcherId, setDispatcherId] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => { loadActiveDispatchers().then(setDispatchers).catch(() => undefined); }, []);
+  const createInvite = async () => {
+    if (!fullName.trim() || !email.trim() || (inviteRole === 'driver' && !dispatcherId)) return Alert.alert('Missing information', 'Enter the employee name and email. Drivers must have an assigned dispatcher.');
+    setCreating(true);
+    try {
+      const invite = await createEmployeeInvite({ email: email.trim(), fullName: fullName.trim(), role: inviteRole, dispatcherId: inviteRole === 'driver' ? dispatcherId : undefined });
+      setFullName(''); setEmail(''); setDispatcherId('');
+      if (invite.emailed) Alert.alert('Invite sent', `The ${inviteRole} invitation was emailed and expires in eight hours.`);
+      else {
+        Alert.alert('Invite created', 'Email delivery is not configured yet. Share the one-time link securely now.');
+        await Share.share({ message: invite.inviteUrl });
+      }
+    } catch (error) {
+      Alert.alert('Invite not created', error instanceof Error ? error.message : 'Please try again.');
+    } finally { setCreating(false); }
+  };
+
+  return <Card>
+    <Text style={styles.cardTitle}>Issue employee invitation</Text>
+    <Text style={styles.muted}>Only Drivers and Dispatchers can self-register. Every link works once and expires after 8 hours.</Text>
+    <Text style={styles.label}>FULL NAME</Text><TextInput value={fullName} onChangeText={setFullName} placeholder="Employee name" placeholderTextColor="#98A2B3" style={styles.loginInput} />
+    <Text style={styles.label}>WORK EMAIL</Text><TextInput value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" placeholder="employee@email.com" placeholderTextColor="#98A2B3" style={styles.loginInput} />
+    <Text style={styles.label}>ROLE</Text><View style={styles.inviteRoleRow}>{(['driver', 'dispatcher'] as const).map((item) => <Pressable key={item} onPress={() => setInviteRole(item)} style={[styles.inviteRoleButton, inviteRole === item && styles.inviteRoleSelected]}><Text style={[styles.inviteRoleText, inviteRole === item && styles.inviteRoleTextSelected]}>{item.toUpperCase()}</Text></Pressable>)}</View>
+    {inviteRole === 'driver' && <><Text style={styles.label}>ASSIGNED DISPATCHER</Text>{dispatchers.length ? <View style={styles.inviteDispatcherList}>{dispatchers.map((dispatcher) => <Pressable key={dispatcher.id} onPress={() => setDispatcherId(dispatcher.id)} style={[styles.inviteDispatcher, dispatcherId === dispatcher.id && styles.inviteDispatcherSelected]}><Text style={[styles.inviteDispatcherName, dispatcherId === dispatcher.id && styles.inviteRoleTextSelected]}>{dispatcher.full_name || dispatcher.email}</Text></Pressable>)}</View> : <Text style={styles.muted}>No active dispatcher is available. Invite a dispatcher first.</Text>}</>}
+    <Pressable style={[styles.primary, creating && styles.buttonDisabled]} onPress={createInvite} disabled={creating}><Text style={styles.primaryText}>{creating ? 'CREATING INVITE…' : 'CREATE 8-HOUR INVITE'}</Text></Pressable>
+  </Card>;
+}
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: MIST },
   loginSafe: { flex: 1, backgroundColor: NAVY },
@@ -373,6 +433,15 @@ const styles = StyleSheet.create({
   roleTextSelected: { color: 'white' },
   previewOpen: { backgroundColor: '#EAF0F8', padding: 13, borderRadius: 8, alignItems: 'center', marginTop: 2 },
   previewOpenText: { color: NAVY, fontSize: 11, fontWeight: '900', letterSpacing: 0.55 },
+  inviteRoleRow: { flexDirection: 'row', gap: 8 },
+  inviteRoleButton: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: '#DCE4EF', borderRadius: radius.sm, alignItems: 'center', justifyContent: 'center' },
+  inviteRoleSelected: { backgroundColor: NAVY, borderColor: NAVY },
+  inviteRoleText: { color: NAVY, fontSize: 11, fontWeight: '900', letterSpacing: 0.4 },
+  inviteRoleTextSelected: { color: color.neutral[0] },
+  inviteDispatcherList: { gap: 6 },
+  inviteDispatcher: { minHeight: 42, justifyContent: 'center', paddingHorizontal: 12, borderRadius: radius.sm, backgroundColor: color.neutral[50], borderWidth: 1, borderColor: color.neutral[200] },
+  inviteDispatcherSelected: { backgroundColor: NAVY, borderColor: NAVY },
+  inviteDispatcherName: { color: NAVY, fontSize: 13, fontWeight: '800' },
   loginLegal: { color: '#98A2B3', fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 22, paddingHorizontal: 8 },
   header: { backgroundColor: color.neutral[0], borderBottomWidth: 1, borderColor: '#E6EAF0', paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, headerBrand: { color: RED, fontWeight: '900', letterSpacing: 2, fontSize: 20 }, headerSub: { color: NAVY, fontSize: 9, fontWeight: '800', letterSpacing: 1.5 }, profile: { backgroundColor: NAVY, color: 'white', width: 34, height: 34, textAlign: 'center', lineHeight: 34, borderRadius: 17, fontWeight: '800' }, content: { padding: layout.screenPadding, gap: 14, paddingBottom: 22 }, eyebrow: { color: RED, letterSpacing: 1.5, fontSize: 11, fontWeight: '900' }, title: { ...type.title, color: INK, marginBottom: 2 }, card: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, gap: 9, ...shadow.card }, cardTitle: { color: INK, fontSize: 15, fontWeight: '800' }, big: { color: NAVY, fontSize: 21, fontWeight: '900' }, amount: { ...type.money, color: NAVY }, muted: { color: '#667085', fontSize: 13, lineHeight: 19 }, body: { color: INK, fontSize: 14, lineHeight: 21 }, smallBold: { color: INK, fontWeight: '800', fontSize: 14 }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, line: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, paddingVertical: 4 }, divider: { height: 1, backgroundColor: '#E8EDF3', marginVertical: 5 }, pill: { overflow: 'hidden', color: '#145DA0', backgroundColor: '#E5F1FB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: '800' }, greenPill: { color: '#087443', backgroundColor: '#E2F7EC' }, redPill: { color: '#9F1724', backgroundColor: '#FDE8EA' }, primary: { backgroundColor: RED, minHeight: touchTarget.minimum, padding: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, primaryText: { color: 'white', fontWeight: '800' }, outline: { borderWidth: 1, borderColor: NAVY, minHeight: touchTarget.minimum, padding: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 5 }, outlineText: { color: NAVY, fontWeight: '800' }, danger: { backgroundColor: '#FDE8EA', minHeight: touchTarget.minimum, padding: 13, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 4 }, dangerText: { color: '#9F1724', fontWeight: '800' }, label: { color: '#344054', fontSize: 13, fontWeight: '700' }, legal: { color: '#667085', fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }, link: { color: RED, fontWeight: '800', marginTop: 5 }, grid: { flexDirection: 'row', gap: 12 }, action: { flex: 1, backgroundColor: 'white', padding: 15, borderRadius: 16, minHeight: 112, justifyContent: 'space-between' }, actionIcon: { color: RED, fontSize: 25, fontWeight: '900' }, actionText: { color: NAVY, fontWeight: '800', fontSize: 13 }, bubble: { padding: 11, borderRadius: 12, color: INK, fontSize: 13, lineHeight: 18 }, driverBubble: { backgroundColor: '#E8F0FA', alignSelf: 'flex-end' }, dispatchBubble: { backgroundColor: '#F2F4F7', alignSelf: 'flex-start' }, compose: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8 }, input: { flex: 1, borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: INK }, send: { backgroundColor: RED, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 11 }, notice: { color: '#667085', fontSize: 12, lineHeight: 18, paddingHorizontal: 4 }, fullInput: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, padding: 11, fontSize: 16, color: INK }, uploadPreview: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#E8EDF3' }, check: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, checkMark: { color: '#087443', fontSize: 18, fontWeight: '900' }, map: { height: 230, borderRadius: 12, overflow: 'hidden' }, nav: { flexDirection: 'row', backgroundColor: 'white', borderTopWidth: 1, borderColor: '#E6EAF0', paddingVertical: 10 }, navItem: { flex: 1, alignItems: 'center' }, navText: { color: '#667085', fontSize: 11, fontWeight: '700' }, navActive: { color: RED, fontWeight: '900' },
   driverStatusHeader: { backgroundColor: NAVY, borderRadius: radius.lg, padding: layout.cardPadding, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 118 }, driverStatusKicker: { color: '#D5E1F2', fontSize: 10, fontWeight: '900', letterSpacing: 1.2 }, driverStatusTitle: { color: color.neutral[0], fontSize: 25, fontWeight: '900', marginTop: 4 }, driverStatusDetail: { color: '#D5E1F2', fontSize: 12, marginTop: 4, maxWidth: 240 }, dutyToggle: { width: 60, height: 34, borderRadius: 17, backgroundColor: color.neutral[500], padding: 4, justifyContent: 'center' }, dutyToggleOn: { backgroundColor: color.status.success }, dutyKnob: { width: 26, height: 26, borderRadius: 13, backgroundColor: color.neutral[0] }, dutyKnobOn: { alignSelf: 'flex-end' }, quickActions: { flexDirection: 'row', gap: 8 }, quickActionPrimary: { backgroundColor: RED, borderRadius: radius.md, padding: 12, minHeight: 76, flex: 1.9, flexDirection: 'row', alignItems: 'center', gap: 9 }, quickAction: { backgroundColor: color.neutral[0], borderRadius: radius.md, padding: 9, minHeight: 76, flex: 1, justifyContent: 'space-between', ...shadow.card }, quickActionIcon: { color: color.neutral[0], fontSize: 22, fontWeight: '900' }, quickActionIconBlue: { color: color.brand.blue, fontSize: 20, fontWeight: '900' }, quickActionTitle: { color: color.neutral[0], fontSize: 12, fontWeight: '900' }, quickActionMeta: { color: '#FAD4D8', fontSize: 10, fontWeight: '700', marginTop: 3 }, quickActionText: { color: NAVY, fontSize: 11, fontWeight: '900' }, cardEyebrow: { color: color.neutral[500], fontSize: 10, letterSpacing: 1.1, fontWeight: '900' }, takeHomeMark: { width: 42, height: 42, backgroundColor: color.status.successSoft, borderRadius: 21, alignItems: 'center', justifyContent: 'center' }, takeHomeMarkText: { color: color.status.success, fontSize: 22, fontWeight: '900' }, earningsMiniRow: { backgroundColor: color.neutral[50], borderRadius: radius.sm, padding: 10, flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginTop: 3 }, earningsMiniLabel: { color: color.neutral[500], fontSize: 11, flexBasis: '62%' }, earningsMiniValue: { color: INK, fontSize: 11, fontWeight: '800', flexBasis: '36%', textAlign: 'right' }, earningsMiniNegative: { color: color.status.danger, fontSize: 11, fontWeight: '800', flexBasis: '36%', textAlign: 'right' }, textButton: { minHeight: touchTarget.minimum, justifyContent: 'center' }, textButtonText: { color: color.brand.blue, fontSize: 13, fontWeight: '900' }, routeRow: { flexDirection: 'row', gap: 12, marginTop: 2 }, routeLine: { alignItems: 'center', width: 16, paddingTop: 7 }, routeDotStart: { height: 10, width: 10, backgroundColor: color.brand.blue, borderRadius: 5 }, routeDash: { width: 2, flex: 1, minHeight: 50, backgroundColor: color.neutral[300], marginVertical: 4 }, routeDotEnd: { height: 10, width: 10, backgroundColor: RED, borderRadius: 5 }, routeDetails: { flex: 1, gap: 1 }, routeLabel: { color: color.neutral[500], fontSize: 10, letterSpacing: 0.9, fontWeight: '900' }, routePlace: { color: INK, fontSize: 14, fontWeight: '900' }, routeAddress: { color: color.neutral[500], fontSize: 12, marginBottom: 10 }, loadFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderColor: color.neutral[200], paddingTop: 11, marginTop: 2 }, loadRate: { color: color.status.success, fontSize: 22, fontWeight: '900' }, loadAction: { backgroundColor: color.brand.blueSoft, minHeight: touchTarget.minimum, borderRadius: radius.sm, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' }, loadActionText: { color: color.brand.blue, fontSize: 12, fontWeight: '900' }, messagePreview: { color: color.neutral[600], fontSize: 12, marginTop: 5, maxWidth: 230, lineHeight: 18 }, messageButton: { minHeight: touchTarget.minimum, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' }, messageButtonText: { color: color.brand.blue, fontSize: 13, fontWeight: '900' }, locationStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 13, minHeight: 66, backgroundColor: color.brand.blueSoft, borderRadius: radius.md }, locationPin: { color: color.brand.blue, fontSize: 20 }, locationTitle: { color: NAVY, fontSize: 13, fontWeight: '900' }, locationDetail: { color: color.neutral[600], fontSize: 11, marginTop: 3 }, locationArrow: { color: color.brand.blue, fontSize: 28, fontWeight: '400' }, payTimeline: { paddingHorizontal: 2, paddingTop: 3 }, payTimelineLine: { height: 4, borderRadius: 2, backgroundColor: color.neutral[200], overflow: 'hidden' }, payTimelineActive: { height: 4, width: '48%', backgroundColor: color.status.success }, payTimelineText: { color: color.neutral[500], fontSize: 11, marginTop: 8, textAlign: 'center' },
