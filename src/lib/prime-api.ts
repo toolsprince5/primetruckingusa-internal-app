@@ -66,6 +66,14 @@ export async function signOut() {
   if (error) throw error;
 }
 
+/** Restores the employee session saved in the device's encrypted storage. */
+export async function restoreSessionProfile(): Promise<Profile | null> {
+  const { data, error } = await client().auth.getSession();
+  if (error) throw error;
+  if (!data.session?.user) return null;
+  return getMyProfile(data.session.user.id);
+}
+
 /** Completes a password-recovery session opened from the Prime Trucking USA app link. */
 export async function completePasswordRecovery(accessToken: string, refreshToken: string, password: string) {
   const { error: sessionError } = await client().auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
