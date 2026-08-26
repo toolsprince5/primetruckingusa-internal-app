@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>Reset password | Prime Trucking USA</title>
+    <style>
+      :root { --navy:#102A43; --red:#C62832; --mist:#F3F6F9; --ink:#172B4D; }
+      * { box-sizing:border-box; } body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--mist); color:var(--ink); font-family:Arial,Helvetica,sans-serif; padding:24px; }
+      main { width:min(100%,460px); background:#fff; border-radius:18px; padding:32px; box-shadow:0 14px 40px rgba(16,42,67,.14); }
+      .brand { color:var(--red); font-size:26px; font-weight:900; letter-spacing:2px; margin:0; } .sub { color:var(--navy); font-size:11px; font-weight:800; letter-spacing:2px; margin:2px 0 28px; }
+      h1 { font-size:25px; margin:0 0 10px; } p { color:#52606D; line-height:1.5; } label { display:block; font-size:12px; font-weight:800; letter-spacing:.7px; margin-top:20px; }
+      input { width:100%; margin-top:7px; padding:14px; border:1px solid #CBD5E1; border-radius:9px; font-size:16px; }
+      button { width:100%; border:0; border-radius:9px; padding:14px; margin-top:18px; color:#fff; background:var(--red); font-weight:800; font-size:15px; cursor:pointer; }
+      button.secondary { background:#E8EEF5; color:var(--navy); } #message { min-height:24px; font-size:14px; font-weight:700; margin-top:14px; } .error { color:#B42318; } .success { color:#087443; }
+      .hidden { display:none; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="brand">PRIME</p><p class="sub">TRUCKING USA</p>
+      <h1>Choose a new password</h1>
+      <p>This secure page works on a computer or phone. Use a password of at least 12 characters.</p>
+      <div id="form" class="hidden">
+        <label for="password">NEW PASSWORD</label>
+        <input id="password" type="password" autocomplete="new-password" minlength="12" />
+        <label for="confirm">CONFIRM NEW PASSWORD</label>
+        <input id="confirm" type="password" autocomplete="new-password" minlength="12" />
+        <button id="save" type="button">SAVE NEW PASSWORD</button>
+        <button id="open-app" class="secondary" type="button">OPEN IN PRIME TRUCKING USA APP</button>
+      </div>
+      <p id="message" aria-live="polite">Checking your secure reset link…</p>
+    </main>
+    <script src="./config.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script>
+      (() => {
+        const message = document.getElementById('message');
+        const form = document.getElementById('form');
+        const config = window.PRIME_RESET_CONFIG;
+        if (!config?.supabaseUrl || !config?.supabaseAnonKey) { message.textContent = 'This reset page is not configured yet. Please contact Prime Trucking USA dispatch.'; message.className = 'error'; return; }
+        const client = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey, { auth: { persistSession: false, detectSessionInUrl: false } });
+        const fragment = new URLSearchParams(window.location.hash.slice(1));
+        const code = new URLSearchParams(window.location.search).get('code');
+        const finish = async () => {
+          try {
+            if (code) { const { error } = await client.auth.exchangeCodeForSession(code); if (error) throw error; }
+            else { const accessToken = fragment.get('access_token'); const refreshToken = fragment.get('refresh_token'); if (!accessToken || !refreshToken || fragment.get('type') !== 'recovery') throw new Error('This reset link is invalid or has expired.'); const { error } = await client.auth.setSession({ access_token: accessToken, refresh_token: refreshToken }); if (error) throw error; }
+            form.classList.remove('hidden'); message.textContent = '';
+          } catch (_) { message.textContent = 'This reset link is invalid, expired, or has already been used. Request a new link from the app.'; message.className = 'error'; }
+        };
+        document.getElementById('save').onclick = async () => {
+          const password = document.getElementById('password').value; const confirm = document.getElementById('confirm').value;
+          if (password.length < 12) { message.textContent = 'Use at least 12 characters.'; message.className = 'error'; return; }
+          if (password !== confirm) { message.textContent = 'The passwords do not match.'; message.className = 'error'; return; }
+          const { error } = await client.auth.updateUser({ password });
+          if (error) { message.textContent = 'Password could not be updated. Request a fresh reset link and try again.'; message.className = 'error'; return; }
+          form.classList.add('hidden'); message.textContent = 'Password updated. You can now sign in to Prime Trucking USA.'; message.className = 'success';
+        };
+        document.getElementById('open-app').onclick = () => { window.location.href = `primetruckingusa://auth/reset-password${window.location.hash}`; };
+        finish();
+      })();
+    </script>
+  </body>
+</html>
