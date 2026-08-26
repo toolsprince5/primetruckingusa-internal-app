@@ -89,7 +89,8 @@ export async function completePasswordRecovery(accessToken: string, refreshToken
  */
 export async function requestPasswordReset(email: string) {
   const { error } = await client().auth.resetPasswordForEmail(email, {
-    redirectTo: 'primetruckingusa://reset-password',
+    // Must match the mobile deep-link route allowed in Supabase Auth.
+    redirectTo: 'primetruckingusa://auth/reset-password',
   });
   if (error) throw error;
 }
