@@ -305,7 +305,7 @@ export default function App() {
     setSendingReset(true);
     try {
       await requestPasswordReset(forgotEmail.trim());
-      Alert.alert('Check your email', 'If an account exists for that address, a password reset link is on its way. The link expires shortly, so use it soon.');
+      Alert.alert('Check your email', 'Open the newest reset link on the same phone where Prime Trucking USA is installed. It will open the app so you can choose a new password.');
       setForgotMode(false);
     } catch (error) {
       Alert.alert('Reset link not sent', friendlyError(error, 'Please try again.'));
