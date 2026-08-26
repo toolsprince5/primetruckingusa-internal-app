@@ -89,8 +89,9 @@ export async function completePasswordRecovery(accessToken: string, refreshToken
  */
 export async function requestPasswordReset(email: string) {
   const { error } = await client().auth.resetPasswordForEmail(email, {
-    // Must match the mobile deep-link route allowed in Supabase Auth.
-    redirectTo: 'primetruckingusa://auth/reset-password',
+    // HTTPS works in any browser. The reset page also offers an optional
+    // "Open in app" action for employees who have the mobile app installed.
+    redirectTo: 'https://primetruckingusa.com/reset-password/',
   });
   if (error) throw error;
 }
