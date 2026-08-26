@@ -9,3 +9,5 @@ google-services.json
 dist/
 *.log
 *.rar
+*.zip
+.gradle-*/

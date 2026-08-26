@@ -21,6 +21,13 @@
           "cameraPermission": "Prime Trucking USA needs camera access to capture receipts and inspection photos."
         }
       ],
+      [
+        "@stream-io/video-react-native-sdk",
+        {
+          "ringing": true,
+          "androidPictureInPicture": true
+        }
+      ],
       "expo-secure-store",
       "expo-notifications"
     ],

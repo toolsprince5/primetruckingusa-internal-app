@@ -10,6 +10,7 @@ The client code is prepared for these selected providers. Secrets must be added 
 4. Deploy `supabase/functions/stream-video-token`.
 5. In Stream, configure calls so drivers can call only their assigned dispatcher or an admin. Enforce this in Stream’s server-side permission rules; do not rely only on hiding UI controls.
 6. Connect FCM and APNs credentials in Stream for incoming call alerts.
+7. Create the Stream push-provider aliases and set their public names in the Expo/EAS environment as `EXPO_PUBLIC_STREAM_FCM_PROVIDER_NAME` and (when iPhone support is enabled) `EXPO_PUBLIC_STREAM_APN_PROVIDER_NAME`.
 
 ## 2. Google Maps
 

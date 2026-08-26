@@ -1,0 +1,53 @@
+pluginManagement {
+  def getRawNodeCommand = {
+    def nodeCommand = "node"
+    def localPropertiesFile = new File(rootDir, "local.properties")
+    if (localPropertiesFile.exists()) {
+      localPropertiesFile.eachLine { line ->
+        if (line.startsWith("NODE_BINARY=")) {
+          nodeCommand = line.substring(12).trim()
+        }
+      }
+    }
+    return nodeCommand
+  }
+  def nodeCommand = getRawNodeCommand()
+
+  def reactNativeGradlePlugin = new File(
+    providers.exec {
+      workingDir(rootDir)
+      commandLine(nodeCommand, "--print", "require.resolve('@react-native/gradle-plugin/package.json', { paths: [require.resolve('react-native/package.json')] })")
+    }.standardOutput.asText.get().trim()
+  ).getParentFile().absolutePath
+  includeBuild(reactNativeGradlePlugin)
+  
+  def expoPluginsPath = new File(
+    providers.exec {
+      workingDir(rootDir)
+      commandLine(nodeCommand, "--print", "require.resolve('expo-modules-autolinking/package.json', { paths: [require.resolve('expo/package.json')] })")
+    }.standardOutput.asText.get().trim(),
+    "../android/expo-gradle-plugin"
+  ).absolutePath
+  includeBuild(expoPluginsPath)
+}
+
+plugins {
+  id("com.facebook.react.settings")
+  id("expo-autolinking-settings")
+}
+
+extensions.configure(com.facebook.react.ReactSettingsExtension) { ex ->
+  if (System.getenv('EXPO_USE_COMMUNITY_AUTOLINKING') == '1') {
+    ex.autolinkLibrariesFromCommand()
+  } else {
+    ex.autolinkLibrariesFromCommand(expoAutolinking.rnConfigCommand)
+  }
+}
+expoAutolinking.useExpoModules()
+
+rootProject.name = 'Prime Trucking USA'
+
+expoAutolinking.useExpoVersionCatalog()
+
+include ':app'
+includeBuild(expoAutolinking.reactNativeGradlePlugin)

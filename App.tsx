@@ -7,6 +7,7 @@ import {
   KeyboardAvoidingView,
   Image,
   Linking,
+  PermissionsAndroid,
   Platform,
   Pressable,
   SafeAreaView,
@@ -22,6 +23,7 @@ import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import * as DocumentPicker from 'expo-document-picker';
 import MapView, { Marker } from 'react-native-maps';
+import { CallingState, RingingCallContent, StreamCall, StreamVideo, StreamVideoRN, type StreamVideoClient, useCalls, usePushRegisterEffect } from '@stream-io/video-react-native-sdk';
 import { isSupabaseConfigured, supabase } from './src/lib/supabase';
 import {
   addThreadMember,
@@ -71,6 +73,7 @@ import {
   uploadRateConfirmation,
 } from './src/lib/prime-api';
 import { registerPushDevice } from './src/lib/notifications';
+import { clearCallingProfile, connectStreamVideo, saveCallingProfile } from './src/lib/stream-video';
 import { color, layout, radius, shadow, space, touchTarget, type } from './src/design/tokens';
 
 type Role = 'Driver' | 'Dispatcher' | 'Admin';
@@ -173,6 +176,7 @@ export default function App() {
   const [inspectionUri, setInspectionUri] = useState<string | null>(null);
   const [locationLabel, setLocationLabel] = useState('Driver • location not yet refreshed');
   const [locationCoords, setLocationCoords] = useState({ latitude: 41.6528, longitude: -83.5379 });
+  const [streamClient, setStreamClient] = useState<StreamVideoClient | null>(null);
 
   const loadTotal = 2900;
   const net = useMemo(() => loadTotal - fuel, [fuel]);
@@ -225,6 +229,7 @@ export default function App() {
         const profile = await restoreSessionProfile();
         if (!active || !profile) return;
         setAuthenticatedProfile(profile);
+        void saveCallingProfile(profile).catch(() => undefined);
         setRole(profile.role.charAt(0).toUpperCase() + profile.role.slice(1) as Role);
         setSignedIn(true);
       } catch {
@@ -256,6 +261,49 @@ export default function App() {
     }).catch(() => undefined);
   }, [authenticatedProfile?.id]);
 
+  useEffect(() => {
+    let active = true;
+    if (!authenticatedProfile) {
+      setStreamClient(null);
+      return () => { active = false; };
+    }
+    connectStreamVideo(authenticatedProfile)
+      .then((client) => { if (active) setStreamClient(client ?? null); })
+      .catch(() => { if (active) setStreamClient(null); });
+    return () => { active = false; };
+  }, [authenticatedProfile?.id]);
+
+  useEffect(() => () => { void streamClient?.disconnectUser().catch(() => undefined); }, [streamClient]);
+
+  const startDirectCall = async (partner: Profile, mode: 'voice' | 'video') => {
+    if (!authenticatedProfile) return Alert.alert('Sign in required', 'Sign in before starting a call.');
+    if (!streamClient) return Alert.alert('Calling is connecting', 'Secure calling is still connecting. Please wait a moment and try again.');
+    if (authenticatedProfile.role === 'driver' && partner.role !== 'dispatcher' && partner.role !== 'admin') {
+      return Alert.alert('Call not allowed', 'Drivers can call only their assigned dispatcher or an administrator.');
+    }
+    if (Platform.OS === 'android') {
+      const permissions = mode === 'video'
+        ? [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO, PermissionsAndroid.PERMISSIONS.CAMERA]
+        : [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+      const result = await PermissionsAndroid.requestMultiple(permissions);
+      if (permissions.some((permission) => result[permission] !== PermissionsAndroid.RESULTS.GRANTED)) {
+        return Alert.alert('Permission needed', `${mode === 'video' ? 'Camera and microphone' : 'Microphone'} access is required for this call.`);
+      }
+    }
+    try {
+      const call = streamClient.call('default', `prime-${Date.now()}-${authenticatedProfile.id.slice(0, 6)}`);
+      await call.getOrCreate({
+        ring: true,
+        notify: true,
+        video: mode === 'video',
+        data: { members: [{ user_id: authenticatedProfile.id }, { user_id: partner.id }], custom: { prime_call_mode: mode, initiated_by: authenticatedProfile.id } },
+      });
+      await call.join();
+    } catch (error) {
+      Alert.alert('Call could not start', friendlyError(error, 'Check your connection and try again.'));
+    }
+  };
+
   const sendMessage = () => {
     if (!message.trim()) return;
     setMessages((current) => [...current, `${person.name}: ${message.trim()}`]);
@@ -269,6 +317,7 @@ export default function App() {
     try {
       const profile = await signIn(loginEmail.trim(), loginPassword);
       setAuthenticatedProfile(profile);
+      void saveCallingProfile(profile).catch(() => undefined);
       setRole(profile.role.charAt(0).toUpperCase() + profile.role.slice(1) as Role);
       setSignedIn(true);
       setLoginPassword('');
@@ -331,8 +380,12 @@ export default function App() {
 
   const leaveApp = async () => {
     if (authenticatedProfile) {
+      try { await streamClient?.disconnectUser(); } catch { /* Sign-out still works when Stream is unavailable. */ }
+      try { await StreamVideoRN.onPushLogout(); } catch { /* Stream device cleanup is best-effort. */ }
       try { await signOut(); } catch { /* local UI can still return to sign-in if the network is unavailable */ }
     }
+    void clearCallingProfile().catch(() => undefined);
+    setStreamClient(null);
     setAuthenticatedProfile(null);
     setSignedIn(false);
     setTrackingAllowed(true);
@@ -398,7 +451,7 @@ export default function App() {
     ? [{ key: 'home', title: 'Home' }, { key: 'messages', title: 'Messages' }, { key: 'loads', title: 'Load' }, { key: 'earnings', title: 'Pay' }, { key: 'tracking', title: 'Track' }]
     : [{ key: 'home', title: 'Home' }, { key: 'messages', title: 'Messages' }, { key: 'loads', title: 'Loads' }, { key: 'tracking', title: 'Map' }, { key: 'settings', title: 'Admin' }];
 
-  return (
+  const workspace = (
     <SafeAreaView style={[styles.safe, isLandscape && styles.safeLandscape]}>
       <StatusBar style="dark" />
       <View style={[styles.header, styles.headerComfortable, isLandscape && styles.headerLandscape]}>
@@ -419,7 +472,7 @@ export default function App() {
       </>}
       <ScrollView contentContainerStyle={[styles.content, isLandscape && styles.contentLandscape]}>
         {screen === 'home' && <Home role={role} profile={authenticatedProfile} setScreen={setScreen} net={net} onDuty={onDuty} setOnDuty={setOnDuty} trackingAllowed={trackingAllowed} />}
-        {screen === 'messages' && <Messages role={role} profile={authenticatedProfile} messages={messages} message={message} setMessage={setMessage} sendMessage={sendMessage} />}
+        {screen === 'messages' && <Messages role={role} profile={authenticatedProfile} messages={messages} message={message} setMessage={setMessage} sendMessage={sendMessage} onStartCall={startDirectCall} callingReady={!!streamClient} />}
         {screen === 'loads' && <Loads role={role} profile={authenticatedProfile} />}
         {screen === 'receipts' && <Receipts profile={authenticatedProfile} fuel={fuel} setFuel={setFuel} receiptUri={receiptUri} setReceiptUri={setReceiptUri} />}
         {screen === 'earnings' && <Earnings profile={authenticatedProfile} net={net} fuel={fuel} percentage={percentage} setPercentage={setPercentage} takeHome={takeHome} />}
@@ -430,6 +483,19 @@ export default function App() {
       <View style={[styles.nav, styles.navComfortable, isLandscape && styles.navLandscape]}>{nav.map((item) => <Pressable key={item.key} style={[styles.navItem, styles.navItemComfortable]} onPress={() => setScreen(item.key)} accessibilityRole="tab" accessibilityState={{ selected: screen === item.key }}><Text style={[styles.navText, styles.navTextComfortable, screen === item.key && styles.navActive]}>{item.title}</Text></Pressable>)}</View>
     </SafeAreaView>
   );
+  return streamClient ? <StreamVideo client={streamClient}><StreamPushRegistration />{workspace}<ActiveCallOverlay landscape={isLandscape} /></StreamVideo> : workspace;
+}
+
+function StreamPushRegistration() {
+  usePushRegisterEffect();
+  return null;
+}
+
+function ActiveCallOverlay({ landscape }: { landscape: boolean }) {
+  const calls = useCalls();
+  const activeCall = calls.find((call) => call.ringing || call.state.callingState !== CallingState.LEFT);
+  if (!activeCall) return null;
+  return <View style={styles.callOverlay}><StreamCall call={activeCall}><RingingCallContent landscape={landscape} onBackPress={() => { void activeCall.leave({ reject: true }).catch(() => undefined); }} /></StreamCall></View>;
 }
 
 function Home({ role, profile, setScreen, net, onDuty, setOnDuty, trackingAllowed }: { role: Role; profile: Profile | null; setScreen: (screen: Screen) => void; net: number; onDuty: boolean; setOnDuty: (value: boolean) => void; trackingAllowed: boolean }) {
@@ -487,7 +553,7 @@ function conversationKey(item: Conversation) {
   return item.kind === 'direct' ? `d:${item.partner.id}` : `g:${item.thread.id}`;
 }
 
-function Messages({ role, profile, messages, message, setMessage, sendMessage }: { role: Role; profile: Profile | null; messages: string[]; message: string; setMessage: (value: string) => void; sendMessage: () => void }) {
+function Messages({ role, profile, messages, message, setMessage, sendMessage, onStartCall, callingReady }: { role: Role; profile: Profile | null; messages: string[]; message: string; setMessage: (value: string) => void; sendMessage: () => void; onStartCall: (partner: Profile, mode: 'voice' | 'video') => Promise<void>; callingReady: boolean }) {
   const [partners, setPartners] = useState<Profile[]>([]);
   const [groupThreads, setGroupThreads] = useState<ChatThreadSummary[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
@@ -541,6 +607,7 @@ function Messages({ role, profile, messages, message, setMessage, sendMessage }:
   ];
   const headerTitle = selected?.kind === 'group' ? (selected.thread.title || 'Group') : selected?.kind === 'direct' ? (selected.partner.full_name || (role === 'Driver' ? 'Dispatcher' : 'Driver')) : (role === 'Driver' ? 'Dispatcher' : 'Driver');
   const canManageGroup = selected?.kind === 'group' && (role === 'Admin' || role === 'Dispatcher');
+  const selectedPartner = selected?.kind === 'direct' ? selected.partner : null;
   const nameFor = (senderId: string) => groupMembers.find((member) => member.id === senderId)?.full_name || 'Team member';
 
   return <>
@@ -582,8 +649,12 @@ function Messages({ role, profile, messages, message, setMessage, sendMessage }:
       />
       <View style={styles.compose}><TextInput value={message} onChangeText={setMessage} placeholder={selected?.kind === 'group' ? 'Message the group…' : 'Message dispatcher…'} style={styles.input} accessibilityLabel="Message text" /><Pressable onPress={profile ? sendLive : sendMessage} disabled={busy} style={styles.send} accessibilityRole="button" accessibilityLabel="Send message"><Text style={styles.primaryText}>{busy ? '…' : 'Send'}</Text></Pressable></View>
     </View>
-    <Text style={styles.notice}>Drivers can message their dispatcher, admins, and any group they belong to. Admins can review operational conversations.</Text>
-    <Pressable style={styles.outline} onPress={() => Alert.alert('Calls', 'Secure Stream voice and video calling is connected at the server layer. The native call screen is the next build step.')}><Text style={styles.outlineText}>Start voice or video call</Text></Pressable>
+    <Text style={styles.notice}>Drivers can message and call their dispatcher or an administrator. Admins can review operational conversations.</Text>
+    <View style={styles.callActions}>
+      <Pressable disabled={!selectedPartner || !callingReady} style={[styles.callButton, (!selectedPartner || !callingReady) && styles.buttonDisabled]} onPress={() => selectedPartner && void onStartCall(selectedPartner, 'voice')} accessibilityRole="button"><Text style={styles.callButtonText}>☎  Voice call</Text></Pressable>
+      <Pressable disabled={!selectedPartner || !callingReady} style={[styles.callButton, styles.callButtonVideo, (!selectedPartner || !callingReady) && styles.buttonDisabled]} onPress={() => selectedPartner && void onStartCall(selectedPartner, 'video')} accessibilityRole="button"><Text style={styles.callButtonText}>▣  Video call</Text></Pressable>
+    </View>
+    {!callingReady && <Text style={styles.notice}>Secure calling is connecting…</Text>}
   </>;
 }
 
@@ -1049,7 +1120,7 @@ const styles = StyleSheet.create({
   inviteDispatcherSelected: { backgroundColor: NAVY, borderColor: NAVY },
   inviteDispatcherName: { color: NAVY, fontSize: 13, fontWeight: '800' },
   loginLegal: { color: '#98A2B3', fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 22, paddingHorizontal: 8 },
-  header: { backgroundColor: color.neutral[0], borderBottomWidth: 1, borderColor: '#E6EAF0', paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, headerLandscape: { paddingVertical: 8, paddingHorizontal: 24 }, headerBrand: { color: RED, fontWeight: '900', letterSpacing: 2, fontSize: 20 }, headerSub: { color: NAVY, fontSize: 9, fontWeight: '800', letterSpacing: 1.5 }, profile: { backgroundColor: NAVY, color: 'white', width: 34, height: 34, textAlign: 'center', lineHeight: 34, borderRadius: 17, fontWeight: '800' }, profileMenuBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 }, profileMenu: { position: 'absolute', top: 60, right: 14, minWidth: 210, backgroundColor: color.neutral[0], borderRadius: radius.md, paddingVertical: 8, zIndex: 21, ...shadow.elevated }, profileMenuHeader: { paddingHorizontal: 16, paddingVertical: 8 }, profileMenuName: { color: INK, fontSize: 14, fontWeight: '900' }, profileMenuEmail: { color: color.neutral[500], fontSize: 12, marginTop: 2 }, profileMenuRole: { color: RED, fontSize: 10, fontWeight: '900', letterSpacing: 0.8, marginTop: 6 }, profileMenuDivider: { height: 1, backgroundColor: color.neutral[200], marginVertical: 2 }, profileMenuSignOut: { minHeight: touchTarget.minimum, justifyContent: 'center', paddingHorizontal: 16 }, profileMenuSignOutText: { color: color.status.danger, fontSize: 14, fontWeight: '900' }, content: { padding: layout.screenPadding, gap: 14, paddingBottom: 22 }, contentLandscape: { width: '100%', maxWidth: 920, alignSelf: 'center', paddingHorizontal: 24, paddingTop: 16 }, safeLandscape: { backgroundColor: MIST }, eyebrow: { color: RED, letterSpacing: 1.5, fontSize: 11, fontWeight: '900' }, title: { ...type.title, color: INK, marginBottom: 2 }, card: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, gap: 9, ...shadow.card }, cardTitle: { color: INK, fontSize: 15, fontWeight: '800' }, big: { color: NAVY, fontSize: 21, fontWeight: '900' }, amount: { ...type.money, color: NAVY }, muted: { color: '#667085', fontSize: 13, lineHeight: 19 }, body: { color: INK, fontSize: 14, lineHeight: 21 }, smallBold: { color: INK, fontWeight: '800', fontSize: 14 }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, line: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, paddingVertical: 4 }, divider: { height: 1, backgroundColor: '#E8EDF3', marginVertical: 5 }, pill: { overflow: 'hidden', color: '#145DA0', backgroundColor: '#E5F1FB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: '800' }, greenPill: { color: '#087443', backgroundColor: '#E2F7EC' }, redPill: { color: '#9F1724', backgroundColor: '#FDE8EA' }, primary: { backgroundColor: RED, minHeight: touchTarget.minimum, padding: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, primaryText: { color: 'white', fontWeight: '800' }, outline: { borderWidth: 1, borderColor: NAVY, minHeight: touchTarget.minimum, padding: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 5 }, outlineText: { color: NAVY, fontWeight: '800' }, danger: { backgroundColor: '#FDE8EA', minHeight: touchTarget.minimum, padding: 13, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 4 }, dangerText: { color: '#9F1724', fontWeight: '800' }, label: { color: '#344054', fontSize: 13, fontWeight: '700' }, legal: { color: '#667085', fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }, link: { color: RED, fontWeight: '800', marginTop: 5 }, grid: { flexDirection: 'row', gap: 12 }, action: { flex: 1, backgroundColor: 'white', padding: 15, borderRadius: 16, minHeight: 112, justifyContent: 'space-between' }, actionIcon: { color: RED, fontSize: 25, fontWeight: '900' }, actionText: { color: NAVY, fontWeight: '800', fontSize: 13 }, bubble: { padding: 11, borderRadius: 12, color: INK, fontSize: 13, lineHeight: 18 }, driverBubble: { backgroundColor: '#E8F0FA', alignSelf: 'flex-end' }, dispatchBubble: { backgroundColor: '#F2F4F7', alignSelf: 'flex-start' }, chatPanel: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, height: 380, ...shadow.card }, chatList: { flex: 1 }, chatListContent: { gap: 8, flexGrow: 1, justifyContent: 'flex-end', paddingBottom: 4 }, bubbleWrap: { maxWidth: '82%' }, bubbleWrapStart: { alignSelf: 'flex-start', alignItems: 'flex-start' }, bubbleWrapEnd: { alignSelf: 'flex-end', alignItems: 'flex-end' }, bubbleTime: { color: color.neutral[400], fontSize: 10, marginTop: 2, marginHorizontal: 2 }, bubbleSender: { color: color.neutral[500], fontSize: 10, fontWeight: '800', marginBottom: 2, marginHorizontal: 2 }, groupManagePanel: { gap: 6, marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderColor: color.neutral[200] }, timestampNote: { color: color.neutral[500], fontSize: 11, marginTop: 2 }, deliveryDocRow: { gap: 4, marginTop: 6 }, activityRow: { gap: 3, paddingVertical: 8, borderBottomWidth: 1, borderColor: color.neutral[100] }, compose: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8 }, input: { flex: 1, borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: INK }, send: { backgroundColor: RED, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 11 }, notice: { color: '#667085', fontSize: 12, lineHeight: 18, paddingHorizontal: 4 }, fullInput: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, padding: 11, fontSize: 16, color: INK }, uploadPreview: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#E8EDF3' }, check: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, checkMark: { color: '#087443', fontSize: 18, fontWeight: '900' }, map: { height: 230, borderRadius: 12, overflow: 'hidden' }, nav: { flexDirection: 'row', backgroundColor: 'white', borderTopWidth: 1, borderColor: '#E6EAF0', paddingVertical: 10 }, navLandscape: { paddingVertical: 7, paddingHorizontal: 24 }, navItem: { flex: 1, alignItems: 'center' }, navText: { color: '#667085', fontSize: 11, fontWeight: '700' }, navActive: { color: RED, fontWeight: '900' },
+  header: { backgroundColor: color.neutral[0], borderBottomWidth: 1, borderColor: '#E6EAF0', paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, headerLandscape: { paddingVertical: 8, paddingHorizontal: 24 }, headerBrand: { color: RED, fontWeight: '900', letterSpacing: 2, fontSize: 20 }, headerSub: { color: NAVY, fontSize: 9, fontWeight: '800', letterSpacing: 1.5 }, profile: { backgroundColor: NAVY, color: 'white', width: 34, height: 34, textAlign: 'center', lineHeight: 34, borderRadius: 17, fontWeight: '800' }, profileMenuBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 }, profileMenu: { position: 'absolute', top: 60, right: 14, minWidth: 210, backgroundColor: color.neutral[0], borderRadius: radius.md, paddingVertical: 8, zIndex: 21, ...shadow.elevated }, profileMenuHeader: { paddingHorizontal: 16, paddingVertical: 8 }, profileMenuName: { color: INK, fontSize: 14, fontWeight: '900' }, profileMenuEmail: { color: color.neutral[500], fontSize: 12, marginTop: 2 }, profileMenuRole: { color: RED, fontSize: 10, fontWeight: '900', letterSpacing: 0.8, marginTop: 6 }, profileMenuDivider: { height: 1, backgroundColor: color.neutral[200], marginVertical: 2 }, profileMenuSignOut: { minHeight: touchTarget.minimum, justifyContent: 'center', paddingHorizontal: 16 }, profileMenuSignOutText: { color: color.status.danger, fontSize: 14, fontWeight: '900' }, content: { padding: layout.screenPadding, gap: 14, paddingBottom: 22 }, contentLandscape: { width: '100%', maxWidth: 920, alignSelf: 'center', paddingHorizontal: 24, paddingTop: 16 }, safeLandscape: { backgroundColor: MIST }, eyebrow: { color: RED, letterSpacing: 1.5, fontSize: 11, fontWeight: '900' }, title: { ...type.title, color: INK, marginBottom: 2 }, card: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, gap: 9, ...shadow.card }, cardTitle: { color: INK, fontSize: 15, fontWeight: '800' }, big: { color: NAVY, fontSize: 21, fontWeight: '900' }, amount: { ...type.money, color: NAVY }, muted: { color: '#667085', fontSize: 13, lineHeight: 19 }, body: { color: INK, fontSize: 14, lineHeight: 21 }, smallBold: { color: INK, fontWeight: '800', fontSize: 14 }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, line: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, paddingVertical: 4 }, divider: { height: 1, backgroundColor: '#E8EDF3', marginVertical: 5 }, pill: { overflow: 'hidden', color: '#145DA0', backgroundColor: '#E5F1FB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: '800' }, greenPill: { color: '#087443', backgroundColor: '#E2F7EC' }, redPill: { color: '#9F1724', backgroundColor: '#FDE8EA' }, primary: { backgroundColor: RED, minHeight: touchTarget.minimum, padding: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, primaryText: { color: 'white', fontWeight: '800' }, outline: { borderWidth: 1, borderColor: NAVY, minHeight: touchTarget.minimum, padding: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 5 }, outlineText: { color: NAVY, fontWeight: '800' }, danger: { backgroundColor: '#FDE8EA', minHeight: touchTarget.minimum, padding: 13, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 4 }, dangerText: { color: '#9F1724', fontWeight: '800' }, label: { color: '#344054', fontSize: 13, fontWeight: '700' }, legal: { color: '#667085', fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }, link: { color: RED, fontWeight: '800', marginTop: 5 }, grid: { flexDirection: 'row', gap: 12 }, action: { flex: 1, backgroundColor: 'white', padding: 15, borderRadius: 16, minHeight: 112, justifyContent: 'space-between' }, actionIcon: { color: RED, fontSize: 25, fontWeight: '900' }, actionText: { color: NAVY, fontWeight: '800', fontSize: 13 }, bubble: { padding: 11, borderRadius: 12, color: INK, fontSize: 13, lineHeight: 18 }, driverBubble: { backgroundColor: '#E8F0FA', alignSelf: 'flex-end' }, dispatchBubble: { backgroundColor: '#F2F4F7', alignSelf: 'flex-start' }, chatPanel: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, height: 380, ...shadow.card }, chatList: { flex: 1 }, chatListContent: { gap: 8, flexGrow: 1, justifyContent: 'flex-end', paddingBottom: 4 }, bubbleWrap: { maxWidth: '82%' }, bubbleWrapStart: { alignSelf: 'flex-start', alignItems: 'flex-start' }, bubbleWrapEnd: { alignSelf: 'flex-end', alignItems: 'flex-end' }, bubbleTime: { color: color.neutral[400], fontSize: 10, marginTop: 2, marginHorizontal: 2 }, bubbleSender: { color: color.neutral[500], fontSize: 10, fontWeight: '800', marginBottom: 2, marginHorizontal: 2 }, groupManagePanel: { gap: 6, marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderColor: color.neutral[200] }, timestampNote: { color: color.neutral[500], fontSize: 11, marginTop: 2 }, deliveryDocRow: { gap: 4, marginTop: 6 }, activityRow: { gap: 3, paddingVertical: 8, borderBottomWidth: 1, borderColor: color.neutral[100] }, compose: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8 }, input: { flex: 1, borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: INK }, send: { backgroundColor: RED, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 11 }, notice: { color: '#667085', fontSize: 12, lineHeight: 18, paddingHorizontal: 4 }, callOverlay: { ...StyleSheet.absoluteFillObject, zIndex: 100, elevation: 100, backgroundColor: NAVY }, callActions: { flexDirection: 'row', gap: 9, marginTop: 3 }, callButton: { flex: 1, minHeight: touchTarget.minimum, borderRadius: radius.sm, backgroundColor: NAVY, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 10 }, callButtonVideo: { backgroundColor: RED }, callButtonText: { color: color.neutral[0], fontWeight: '900', fontSize: 13 }, fullInput: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, padding: 11, fontSize: 16, color: INK }, uploadPreview: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#E8EDF3' }, check: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, checkMark: { color: '#087443', fontSize: 18, fontWeight: '900' }, map: { height: 230, borderRadius: 12, overflow: 'hidden' }, nav: { flexDirection: 'row', backgroundColor: 'white', borderTopWidth: 1, borderColor: '#E6EAF0', paddingVertical: 10 }, navLandscape: { paddingVertical: 7, paddingHorizontal: 24 }, navItem: { flex: 1, alignItems: 'center' }, navText: { color: '#667085', fontSize: 11, fontWeight: '700' }, navActive: { color: RED, fontWeight: '900' },
   driverStatusHeader: { backgroundColor: NAVY, borderRadius: radius.lg, padding: layout.cardPadding, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 118 }, driverStatusKicker: { color: '#D5E1F2', fontSize: 10, fontWeight: '900', letterSpacing: 1.2 }, driverStatusTitle: { color: color.neutral[0], fontSize: 25, fontWeight: '900', marginTop: 4 }, driverStatusDetail: { color: '#D5E1F2', fontSize: 12, marginTop: 4, maxWidth: 240 }, dutyToggle: { width: 60, height: 34, borderRadius: 17, backgroundColor: color.neutral[500], padding: 4, justifyContent: 'center' }, dutyToggleOn: { backgroundColor: color.status.success }, dutyToggleDisabled: { opacity: 0.5 }, dutyKnob: { width: 26, height: 26, borderRadius: 13, backgroundColor: color.neutral[0] }, dutyKnobOn: { alignSelf: 'flex-end' }, quickActions: { flexDirection: 'row', gap: 8 }, quickActionPrimary: { backgroundColor: RED, borderRadius: radius.md, padding: 12, minHeight: 76, flex: 1.9, flexDirection: 'row', alignItems: 'center', gap: 9 }, quickAction: { backgroundColor: color.neutral[0], borderRadius: radius.md, padding: 9, minHeight: 76, flex: 1, justifyContent: 'space-between', ...shadow.card }, quickActionIcon: { color: color.neutral[0], fontSize: 22, fontWeight: '900' }, quickActionIconBlue: { color: color.brand.blue, fontSize: 20, fontWeight: '900' }, quickActionTitle: { color: color.neutral[0], fontSize: 12, fontWeight: '900' }, quickActionMeta: { color: '#FAD4D8', fontSize: 10, fontWeight: '700', marginTop: 3 }, quickActionText: { color: NAVY, fontSize: 11, fontWeight: '900' }, cardEyebrow: { color: color.neutral[500], fontSize: 10, letterSpacing: 1.1, fontWeight: '900' }, takeHomeMark: { width: 42, height: 42, backgroundColor: color.status.successSoft, borderRadius: 21, alignItems: 'center', justifyContent: 'center' }, takeHomeMarkText: { color: color.status.success, fontSize: 22, fontWeight: '900' }, earningsMiniRow: { backgroundColor: color.neutral[50], borderRadius: radius.sm, padding: 10, flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginTop: 3 }, earningsMiniLabel: { color: color.neutral[500], fontSize: 11, flexBasis: '62%' }, earningsMiniValue: { color: INK, fontSize: 11, fontWeight: '800', flexBasis: '36%', textAlign: 'right' }, earningsMiniNegative: { color: color.status.danger, fontSize: 11, fontWeight: '800', flexBasis: '36%', textAlign: 'right' }, textButton: { minHeight: touchTarget.minimum, justifyContent: 'center' }, textButtonText: { color: color.brand.blue, fontSize: 13, fontWeight: '900' }, routeRow: { flexDirection: 'row', gap: 12, marginTop: 2 }, routeLine: { alignItems: 'center', width: 16, paddingTop: 7 }, routeDotStart: { height: 10, width: 10, backgroundColor: color.brand.blue, borderRadius: 5 }, routeDash: { width: 2, flex: 1, minHeight: 50, backgroundColor: color.neutral[300], marginVertical: 4 }, routeDotEnd: { height: 10, width: 10, backgroundColor: RED, borderRadius: 5 }, routeDetails: { flex: 1, gap: 1 }, routeLabel: { color: color.neutral[500], fontSize: 10, letterSpacing: 0.9, fontWeight: '900' }, routePlace: { color: INK, fontSize: 14, fontWeight: '900' }, routeAddress: { color: color.neutral[500], fontSize: 12, marginBottom: 10 }, loadFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderColor: color.neutral[200], paddingTop: 11, marginTop: 2 }, loadRate: { color: color.status.success, fontSize: 22, fontWeight: '900' }, loadAction: { backgroundColor: color.brand.blueSoft, minHeight: touchTarget.minimum, borderRadius: radius.sm, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' }, loadActionText: { color: color.brand.blue, fontSize: 12, fontWeight: '900' }, messagePreview: { color: color.neutral[600], fontSize: 12, marginTop: 5, maxWidth: 230, lineHeight: 18 }, messageButton: { minHeight: touchTarget.minimum, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' }, messageButtonText: { color: color.brand.blue, fontSize: 13, fontWeight: '900' }, locationStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 13, minHeight: 66, backgroundColor: color.brand.blueSoft, borderRadius: radius.md }, locationPin: { color: color.brand.blue, fontSize: 20 }, locationTitle: { color: NAVY, fontSize: 13, fontWeight: '900' }, locationDetail: { color: color.neutral[600], fontSize: 11, marginTop: 3 }, locationArrow: { color: color.brand.blue, fontSize: 28, fontWeight: '400' }, payTimeline: { paddingHorizontal: 2, paddingTop: 3 }, payTimelineLine: { height: 4, borderRadius: 2, backgroundColor: color.neutral[200], overflow: 'hidden' }, payTimelineActive: { height: 4, width: '48%', backgroundColor: color.status.success }, payTimelineText: { color: color.neutral[500], fontSize: 11, marginTop: 8, textAlign: 'center' },
   screenLead: { color: color.neutral[500], fontSize: 14, lineHeight: 20, marginTop: -6, marginBottom: 2 }, approvalActions: { flexDirection: 'row', gap: 8, marginTop: 4 }, approveButton: { flex: 1, minHeight: touchTarget.minimum, justifyContent: 'center', alignItems: 'center', borderRadius: radius.sm, backgroundColor: color.status.success }, approveButtonText: { color: color.neutral[0], fontWeight: '900', fontSize: 12 }, rejectButton: { minHeight: touchTarget.minimum, justifyContent: 'center', alignItems: 'center', borderRadius: radius.sm, backgroundColor: color.status.dangerSoft, paddingHorizontal: 16 }, rejectButtonText: { color: color.status.danger, fontWeight: '900', fontSize: 12 }, receiptHelp: { color: color.neutral[500], fontSize: 13, lineHeight: 19, marginBottom: 5 }, currencyInput: { minHeight: touchTarget.comfortable, borderWidth: 1, borderColor: color.neutral[300], borderRadius: radius.sm, flexDirection: 'row', alignItems: 'center', backgroundColor: color.neutral[50] }, currencyMark: { color: color.neutral[500], fontSize: 18, marginLeft: 14, fontWeight: '700' }, currencyField: { flex: 1, fontSize: 17, color: INK, paddingHorizontal: 8, paddingVertical: 11 }, receiptDropzone: { minHeight: 120, borderWidth: 1.5, borderColor: color.brand.blue, borderStyle: 'dashed', borderRadius: radius.md, backgroundColor: color.brand.blueSoft, alignItems: 'center', justifyContent: 'center' }, receiptCamera: { color: color.brand.blue, fontSize: 24, fontWeight: '900' }, receiptDropzoneTitle: { color: NAVY, fontSize: 14, fontWeight: '900', marginTop: 5 }, receiptDropzoneDetail: { color: color.neutral[600], fontSize: 12, marginTop: 2 }, paymentBanner: { backgroundColor: NAVY, borderRadius: radius.lg, padding: layout.cardPadding, gap: 4 }, paymentBannerLabel: { color: '#D5E1F2', fontSize: 10, fontWeight: '900', letterSpacing: 1.1 }, paymentBannerDate: { color: color.neutral[0], fontSize: 20, fontWeight: '900' }, paymentBannerDetail: { color: '#D5E1F2', fontSize: 12 }, earningsFlowRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }, earningsFlowValue: { color: color.status.success, fontSize: 26, fontWeight: '900' }, earningsCost: { color: color.status.danger, fontSize: 26, fontWeight: '900' }, earningsFlowSymbol: { color: color.neutral[400], fontSize: 23, fontWeight: '600' }, netResult: { backgroundColor: color.status.successSoft, borderRadius: radius.sm, padding: 12, marginTop: 4 }, netResultLabel: { color: color.status.success, fontSize: 10, fontWeight: '900', letterSpacing: 1 }, netResultValue: { color: color.status.success, fontSize: 25, fontWeight: '900', marginTop: 3 }, percentageControl: { minHeight: touchTarget.comfortable, borderWidth: 2, borderColor: color.brand.blue, borderRadius: radius.sm, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, marginTop: 3 }, percentageInput: { flex: 1, fontSize: 22, fontWeight: '900', color: NAVY, paddingVertical: 9 }, percentageSuffix: { color: color.brand.blue, fontSize: 20, fontWeight: '900' }, takeHomeResult: { color: color.status.success, fontSize: 34, fontWeight: '900', marginTop: 3 },
   headerComfortable: { paddingTop: 18, paddingBottom: 16 }, headerRole: { color: color.neutral[500], fontSize: 8, fontWeight: '900', letterSpacing: 0.9, marginTop: 3 }, roleAssignmentNotice: { color: color.brand.blue, backgroundColor: color.brand.blueSoft, borderRadius: radius.sm, padding: 10, fontSize: 12, fontWeight: '900' }, navComfortable: { paddingTop: 9, paddingBottom: 18, minHeight: 76 }, navItemComfortable: { minHeight: 49, justifyContent: 'center', paddingHorizontal: 3 }, navTextComfortable: { fontSize: 13, letterSpacing: 0.1 },
