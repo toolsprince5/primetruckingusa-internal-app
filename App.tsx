@@ -24,16 +24,28 @@ import * as DocumentPicker from 'expo-document-picker';
 import MapView, { Marker } from 'react-native-maps';
 import { isSupabaseConfigured, supabase } from './src/lib/supabase';
 import {
+  addThreadMember,
+  createGroupThread,
+  getDeliveryDocumentUrl,
+  getInspectionPhotoUrl,
   getOrCreateDirectThread,
   getRateConfirmationUrl,
+  getReceiptImageUrl,
   getTrackingSettings,
   listConversationPartners,
+  loadDeliveryDocumentsForDriver,
   loadInspections,
+  loadInspectionsForDriver,
   loadLatestLocations,
   loadMyLoads,
+  loadMyThreads,
+  loadRateConfirmationsForDispatcher,
   loadReceipts,
+  loadReceiptsForDriver,
+  loadThreadMembers,
   loadThreadMessages,
   loadWeeklyEarnings,
+  removeThreadMember,
   reviewReceipt,
   saveLocation,
   saveReceipt,
@@ -51,7 +63,10 @@ import {
   signOut,
   submitInspection,
   subscribeToThread,
+  uploadDeliveryDocument,
   type AppMessage,
+  type ChatThreadSummary,
+  type DeliveryDocumentType,
   type Profile,
   uploadRateConfirmation,
 } from './src/lib/prime-api';
@@ -466,24 +481,85 @@ function Home({ role, profile, setScreen, net, onDuty, setOnDuty, trackingAllowe
   </>;
 }
 
+type Conversation = { kind: 'direct'; partner: Profile } | { kind: 'group'; thread: ChatThreadSummary };
+
+function conversationKey(item: Conversation) {
+  return item.kind === 'direct' ? `d:${item.partner.id}` : `g:${item.thread.id}`;
+}
+
 function Messages({ role, profile, messages, message, setMessage, sendMessage }: { role: Role; profile: Profile | null; messages: string[]; message: string; setMessage: (value: string) => void; sendMessage: () => void }) {
   const [partners, setPartners] = useState<Profile[]>([]);
-  const [selectedPartner, setSelectedPartner] = useState<Profile | null>(null);
+  const [groupThreads, setGroupThreads] = useState<ChatThreadSummary[]>([]);
+  const [selected, setSelected] = useState<Conversation | null>(null);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [liveMessages, setLiveMessages] = useState<AppMessage[]>([]);
+  const [groupMembers, setGroupMembers] = useState<(Profile & { joined_at: string })[]>([]);
   const [busy, setBusy] = useState(false);
-  useEffect(() => { if (!profile) return; listConversationPartners(profile).then((people) => { setPartners(people); setSelectedPartner(people[0] ?? null); }).catch(() => undefined); }, [profile?.id]);
-  useEffect(() => { if (!profile || !selectedPartner) return; let active = true; getOrCreateDirectThread(selectedPartner.id).then(async (id) => { if (!active) return; setThreadId(id); setLiveMessages(await loadThreadMessages(id)); }).catch((e) => Alert.alert('Messages unavailable', friendlyError(e, 'Please try again.'))); return () => { active = false; }; }, [profile?.id, selectedPartner?.id]);
+  const [showNewGroup, setShowNewGroup] = useState(false);
+  const [showManageGroup, setShowManageGroup] = useState(false);
+
+  const refreshConversations = () => {
+    if (!profile) return;
+    listConversationPartners(profile).then(setPartners).catch(() => undefined);
+    loadMyThreads(profile.id).then((threads) => setGroupThreads(threads.filter((item) => item.is_group))).catch(() => undefined);
+  };
+  useEffect(refreshConversations, [profile?.id]);
+
+  // Default to the first direct conversation once partners load, unless a
+  // conversation (e.g. a just-created group) has already been selected.
+  useEffect(() => { if (profile && !selected && partners[0]) setSelected({ kind: 'direct', partner: partners[0] }); }, [profile?.id, partners]);
+
+  useEffect(() => {
+    if (!profile || !selected) return;
+    let active = true;
+    const resolveThreadId = selected.kind === 'direct' ? getOrCreateDirectThread(selected.partner.id) : Promise.resolve(selected.thread.id);
+    resolveThreadId.then(async (id) => {
+      if (!active) return;
+      setThreadId(id);
+      setLiveMessages(await loadThreadMessages(id));
+    }).catch((e) => Alert.alert('Messages unavailable', friendlyError(e, 'Please try again.')));
+    return () => { active = false; };
+  }, [profile?.id, selected && conversationKey(selected)]);
+
+  useEffect(() => {
+    if (!threadId || selected?.kind !== 'group') { setGroupMembers([]); return; }
+    let active = true;
+    loadThreadMembers(threadId).then((members) => { if (active) setGroupMembers(members); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [threadId, selected?.kind]);
+
   useEffect(() => { if (!threadId) return; const channel = subscribeToThread(threadId, (next) => setLiveMessages((current) => current.some((item) => item.id === next.id) ? current : [...current, next])); return () => { channel.unsubscribe(); }; }, [threadId]);
+
   const sendLive = async () => { if (!profile || !threadId || !message.trim()) return; setBusy(true); try { await sendThreadMessage(threadId, profile.id, message); setMessage(''); } catch (e) { Alert.alert('Message not sent', friendlyError(e, 'Please try again.')); } finally { setBusy(false); } };
   const shown = profile ? liveMessages : messages.map((body, index) => ({ id: String(index), sender_id: body.startsWith('Driver') ? 'driver' : 'dispatch', body, thread_id: '', created_at: '' }));
   const listRef = useRef<FlatList>(null);
   useEffect(() => { if (shown.length) requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: true })); }, [shown.length, threadId]);
+
+  const conversations: Conversation[] = [
+    ...partners.map((partner): Conversation => ({ kind: 'direct', partner })),
+    ...groupThreads.map((thread): Conversation => ({ kind: 'group', thread })),
+  ];
+  const headerTitle = selected?.kind === 'group' ? (selected.thread.title || 'Group') : selected?.kind === 'direct' ? (selected.partner.full_name || (role === 'Driver' ? 'Dispatcher' : 'Driver')) : (role === 'Driver' ? 'Dispatcher' : 'Driver');
+  const canManageGroup = selected?.kind === 'group' && (role === 'Admin' || role === 'Dispatcher');
+  const nameFor = (senderId: string) => groupMembers.find((member) => member.id === senderId)?.full_name || 'Team member';
+
   return <>
     <Text style={styles.eyebrow}>OPERATIONS CHAT</Text><Text style={styles.title}>Messages</Text>
+    {role === 'Admin' && profile && <Pressable style={styles.outline} onPress={() => setShowNewGroup((current) => !current)} accessibilityRole="button"><Text style={styles.outlineText}>{showNewGroup ? 'Close' : '+ New group'}</Text></Pressable>}
+    {showNewGroup && profile && <NewGroupForm creatorId={profile.id} onCreated={(newThreadId, title) => {
+      setShowNewGroup(false);
+      refreshConversations();
+      setSelected({ kind: 'group', thread: { id: newThreadId, title, is_group: true, created_at: new Date().toISOString() } });
+    }} />}
     <Card>
-      <View style={styles.row}><View><Text style={styles.cardTitle}>{selectedPartner?.full_name || (role === 'Driver' ? 'Dispatcher' : 'Driver')}</Text><Text style={styles.muted}>Direct operational chat • available now</Text></View><Pill tone="green">Online</Pill></View>
-      {profile && partners.length > 1 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>{partners.map((partner) => <Pressable key={partner.id} onPress={() => setSelectedPartner(partner)}><Pill tone={selectedPartner?.id === partner.id ? 'green' : 'blue'}>{partner.full_name || partner.role}</Pill></Pressable>)}</ScrollView>}
+      <View style={styles.row}><View><Text style={styles.cardTitle}>{headerTitle}</Text><Text style={styles.muted}>{selected?.kind === 'group' ? `Group chat • ${groupMembers.length || '…'} participant${groupMembers.length === 1 ? '' : 's'}` : 'Direct operational chat • available now'}</Text></View><Pill tone="green">{selected?.kind === 'group' ? 'Group' : 'Online'}</Pill></View>
+      {profile && conversations.length > 1 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>{conversations.map((item) => {
+        const label = item.kind === 'direct' ? (item.partner.full_name || item.partner.role) : (item.thread.title || 'Group');
+        const isSelected = !!selected && conversationKey(item) === conversationKey(selected);
+        return <Pressable key={conversationKey(item)} onPress={() => setSelected(item)}><Pill tone={isSelected ? 'green' : 'blue'}>{item.kind === 'group' ? `👥 ${label}` : label}</Pill></Pressable>;
+      })}</ScrollView>}
+      {canManageGroup && <Pressable style={styles.previewToggle} onPress={() => setShowManageGroup((current) => !current)}><Text style={styles.previewToggleText}>{showManageGroup ? 'Hide participants' : 'Manage participants'}</Text></Pressable>}
+      {canManageGroup && showManageGroup && selected?.kind === 'group' && <GroupParticipants threadId={selected.thread.id} members={groupMembers} onChanged={async () => setGroupMembers(await loadThreadMembers(selected.thread.id))} />}
     </Card>
     <View style={styles.chatPanel}>
       <FlatList
@@ -496,27 +572,158 @@ function Messages({ role, profile, messages, message, setMessage, sendMessage }:
         ListEmptyComponent={<Text style={styles.muted}>No messages yet. Say hello below.</Text>}
         renderItem={({ item }) => {
           const mine = item.sender_id === profile?.id || item.sender_id === 'driver';
+          const showSenderName = selected?.kind === 'group' && !mine;
           return <View style={[styles.bubbleWrap, mine ? styles.bubbleWrapEnd : styles.bubbleWrapStart]}>
+            {showSenderName && <Text style={styles.bubbleSender}>{nameFor(item.sender_id)}</Text>}
             <Text style={[styles.bubble, mine ? styles.driverBubble : styles.dispatchBubble]}>{item.body}</Text>
             {!!item.created_at && <Text style={styles.bubbleTime}>{new Date(item.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</Text>}
           </View>;
         }}
       />
-      <View style={styles.compose}><TextInput value={message} onChangeText={setMessage} placeholder="Message dispatcher…" style={styles.input} accessibilityLabel="Message text" /><Pressable onPress={profile ? sendLive : sendMessage} disabled={busy} style={styles.send} accessibilityRole="button" accessibilityLabel="Send message"><Text style={styles.primaryText}>{busy ? '…' : 'Send'}</Text></Pressable></View>
+      <View style={styles.compose}><TextInput value={message} onChangeText={setMessage} placeholder={selected?.kind === 'group' ? 'Message the group…' : 'Message dispatcher…'} style={styles.input} accessibilityLabel="Message text" /><Pressable onPress={profile ? sendLive : sendMessage} disabled={busy} style={styles.send} accessibilityRole="button" accessibilityLabel="Send message"><Text style={styles.primaryText}>{busy ? '…' : 'Send'}</Text></Pressable></View>
     </View>
-    <Text style={styles.notice}>Drivers can message their dispatcher and admins. Admins can review operational conversations.</Text>
+    <Text style={styles.notice}>Drivers can message their dispatcher, admins, and any group they belong to. Admins can review operational conversations.</Text>
     <Pressable style={styles.outline} onPress={() => Alert.alert('Calls', 'Secure Stream voice and video calling is connected at the server layer. The native call screen is the next build step.')}><Text style={styles.outlineText}>Start voice or video call</Text></Pressable>
   </>;
 }
 
+function NewGroupForm({ creatorId, onCreated }: { creatorId: string; onCreated: (threadId: string, title: string) => void }) {
+  const [title, setTitle] = useState('');
+  const [people, setPeople] = useState<Profile[]>([]);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [creating, setCreating] = useState(false);
+  useEffect(() => { Promise.all([loadActiveDispatchers(), loadActiveDrivers()]).then(([dispatchers, drivers]) => setPeople([...dispatchers, ...drivers].filter((person) => person.id !== creatorId))).catch(() => undefined); }, [creatorId]);
+  const toggle = (id: string) => setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const create = async () => {
+    if (!title.trim()) return Alert.alert('Name the group', 'Enter a group name.');
+    if (selectedIds.length === 0) return Alert.alert('Add participants', 'Select at least one driver or dispatcher.');
+    setCreating(true);
+    try {
+      const newThreadId = await createGroupThread(title.trim(), selectedIds, creatorId);
+      onCreated(newThreadId, title.trim());
+    } catch (e) { Alert.alert('Group not created', friendlyError(e, 'Please try again.')); } finally { setCreating(false); }
+  };
+  return <Card>
+    <Text style={styles.cardTitle}>New group</Text>
+    <Text style={styles.label}>GROUP NAME</Text>
+    <TextInput value={title} onChangeText={setTitle} placeholder="e.g. Midwest Drivers" placeholderTextColor="#98A2B3" style={styles.loginInput} accessibilityLabel="Group name" />
+    <Text style={styles.label}>PARTICIPANTS</Text>
+    {people.length === 0 ? <Text style={styles.muted}>No other active drivers or dispatchers yet.</Text> : <View style={styles.inviteDispatcherList}>{people.map((person) => (
+      <Pressable key={person.id} onPress={() => toggle(person.id)} style={[styles.inviteDispatcher, selectedIds.includes(person.id) && styles.inviteDispatcherSelected]} accessibilityRole="checkbox" accessibilityState={{ checked: selectedIds.includes(person.id) }}>
+        <Text style={[styles.inviteDispatcherName, selectedIds.includes(person.id) && styles.inviteRoleTextSelected]}>{person.full_name || person.email} · {person.role}</Text>
+      </Pressable>
+    ))}</View>}
+    <Pressable style={[styles.primary, creating && styles.buttonDisabled]} onPress={create} disabled={creating}><Text style={styles.primaryText}>{creating ? 'CREATING GROUP…' : 'CREATE GROUP'}</Text></Pressable>
+  </Card>;
+}
+
+function GroupParticipants({ threadId, members, onChanged }: { threadId: string; members: (Profile & { joined_at: string })[]; onChanged: () => void | Promise<void> }) {
+  const [candidates, setCandidates] = useState<Profile[]>([]);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  useEffect(() => { Promise.all([loadActiveDispatchers(), loadActiveDrivers()]).then(([dispatchers, drivers]) => setCandidates([...dispatchers, ...drivers])).catch(() => undefined); }, []);
+  const memberIds = new Set(members.map((member) => member.id));
+  const addable = candidates.filter((person) => !memberIds.has(person.id));
+  const add = async (personId: string) => {
+    setBusyId(personId);
+    try { await addThreadMember(threadId, personId); await onChanged(); }
+    catch (e) { Alert.alert('Could not add participant', friendlyError(e, 'Please try again.')); }
+    finally { setBusyId(null); }
+  };
+  const remove = async (personId: string) => {
+    setBusyId(personId);
+    try { await removeThreadMember(threadId, personId); await onChanged(); }
+    catch (e) { Alert.alert('Could not remove participant', friendlyError(e, 'Please try again.')); }
+    finally { setBusyId(null); }
+  };
+  return <View style={styles.groupManagePanel}>
+    <Text style={styles.label}>CURRENT PARTICIPANTS</Text>
+    {members.map((member) => (
+      <View key={member.id} style={styles.row}>
+        <Text style={styles.body}>{member.full_name || member.email} · {member.role}</Text>
+        <Pressable onPress={() => remove(member.id)} disabled={busyId === member.id} accessibilityRole="button" accessibilityLabel={`Remove ${member.full_name || member.email}`}><Text style={styles.rejectButtonText}>{busyId === member.id ? '…' : 'Remove'}</Text></Pressable>
+      </View>
+    ))}
+    <Text style={styles.label}>ADD PARTICIPANT</Text>
+    {addable.length === 0 ? <Text style={styles.muted}>No one else active is available to add.</Text> : addable.map((person) => (
+      <View key={person.id} style={styles.row}>
+        <Text style={styles.body}>{person.full_name || person.email} · {person.role}</Text>
+        <Pressable onPress={() => add(person.id)} disabled={busyId === person.id} accessibilityRole="button" accessibilityLabel={`Add ${person.full_name || person.email}`}><Text style={styles.link}>{busyId === person.id ? '…' : 'Add'}</Text></Pressable>
+      </View>
+    ))}
+  </View>;
+}
+
+const DELIVERY_DOC_LABELS: Record<DeliveryDocumentType, string> = { pod: 'Proof of delivery', bol: 'Bill of lading' };
+
 function Loads({ role, profile }: { role: Role; profile: Profile | null }) {
   const [loads, setLoads] = useState<any[]>([]);
   const [loadingLoads, setLoadingLoads] = useState(!!profile);
+  const [uploadingDoc, setUploadingDoc] = useState<string | null>(null);
   const refreshLoads = () => loadMyLoads().then(setLoads).catch((e) => Alert.alert('Loads unavailable', friendlyError(e, 'Please try again.'))).finally(() => setLoadingLoads(false));
   useEffect(() => { if (profile) refreshLoads(); }, [profile?.id]);
-  const activeLoads = profile ? loads : [{ id: 'demo', load_number: '4598933-1', rate_cents: 290000, pickup_name: 'Thermwell Products', pickup_address: 'Mahwah, NJ', delivery_name: 'Menard', delivery_address: 'Shelby, IA', status: 'assigned', rate_confirmations: [] }];
-  const attachRateConfirmation = async (loadId: string) => { if (!profile) return Alert.alert('Preview only', 'Sign in to send a rate confirmation.'); const selected = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true, multiple: false }); if (selected.canceled) return; const file = selected.assets[0]; try { await uploadRateConfirmation({ loadId, uploadedBy: profile.id, uri: file.uri, filename: file.name || 'rate-confirmation.pdf', mimeType: file.mimeType }); await refreshLoads(); Alert.alert('Sent', 'The rate confirmation is now available securely to the assigned driver.'); } catch (e) { Alert.alert('Document not sent', friendlyError(e, 'Please try again.')); } };
-  return <><Text style={styles.title}>{role === 'Driver' ? 'My Load' : 'Load Management'}</Text>{profile && loadingLoads ? <Card><Text style={styles.muted}>Loading your loads…</Text></Card> : <>{activeLoads.length === 0 && <Card><Text style={styles.muted}>No assigned loads yet.</Text></Card>}{activeLoads.map((load) => <Card key={load.id}><View style={styles.row}><Text style={styles.smallBold}>Load #{load.load_number}</Text><Pill tone="green">{load.status}</Pill></View><Text style={styles.amount}>{money(load.rate_cents / 100)}</Text><Text style={styles.muted}>Rate confirmation total</Text><View style={styles.divider} /><Text style={styles.cardTitle}>Pickup</Text><Text style={styles.body}>{load.pickup_name || '—'} • {load.pickup_address || '—'}</Text><Text style={styles.cardTitle}>Delivery</Text><Text style={styles.body}>{load.delivery_name || '—'}</Text>{load.rate_confirmations?.[0] && <Pressable style={styles.outline} onPress={async () => { try { await Linking.openURL(await getRateConfirmationUrl(load.rate_confirmations[0].storage_path)); } catch (e) { Alert.alert('Document unavailable', friendlyError(e, 'Please try again.')); } }}><Text style={styles.outlineText}>View rate confirmation</Text></Pressable>}{profile && (profile.role === 'dispatcher' || profile.role === 'admin') && <Pressable style={styles.primary} onPress={() => attachRateConfirmation(load.id)}><Text style={styles.primaryText}>Send rate confirmation PDF</Text></Pressable>}</Card>)}</>}</>;
+  const activeLoads = profile ? loads : [{ id: 'demo', load_number: '4598933-1', rate_cents: 290000, pickup_name: 'Thermwell Products', pickup_address: 'Mahwah, NJ', delivery_name: 'Menard', delivery_address: 'Shelby, IA', status: 'assigned', rate_confirmations: [], delivery_documents: [] }];
+  const attachRateConfirmation = async (loadId: string, hasExisting: boolean) => {
+    if (!profile) return Alert.alert('Preview only', 'Sign in to send a rate confirmation.');
+    const selected = await DocumentPicker.getDocumentAsync({ type: 'application/pdf', copyToCacheDirectory: true, multiple: false });
+    if (selected.canceled) return;
+    const file = selected.assets[0];
+    try {
+      await uploadRateConfirmation({ loadId, uploadedBy: profile.id, uri: file.uri, filename: file.name || 'rate-confirmation.pdf', mimeType: file.mimeType });
+      await refreshLoads();
+      Alert.alert(hasExisting ? 'Updated' : 'Sent', hasExisting ? 'The updated rate confirmation now replaces the previous version for the assigned driver. The earlier version stays on record.' : 'The rate confirmation is now available securely to the assigned driver.');
+    } catch (e) { Alert.alert('Document not sent', friendlyError(e, 'Please try again.')); }
+  };
+  const uploadDelivery = async (loadId: string, documentType: DeliveryDocumentType) => {
+    if (!profile) return Alert.alert('Preview only', 'Sign in to upload delivery documents.');
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) return Alert.alert('Photo permission needed', 'Allow photo access to attach a clear photo.');
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.85 });
+    if (result.canceled) return;
+    setUploadingDoc(`${loadId}:${documentType}`);
+    try {
+      await uploadDeliveryDocument({ loadId, driverId: profile.id, documentType, uri: result.assets[0].uri });
+      await refreshLoads();
+      Alert.alert('Uploaded', `${DELIVERY_DOC_LABELS[documentType]} photo was sent securely and time-stamped.`);
+    } catch (e) { Alert.alert('Photo not sent', friendlyError(e, 'Please try again.')); } finally { setUploadingDoc(null); }
+  };
+  const openDocument = async (getUrl: () => Promise<string>) => {
+    try { await Linking.openURL(await getUrl()); } catch (e) { Alert.alert('Document unavailable', friendlyError(e, 'Please try again.')); }
+  };
+  return <><Text style={styles.title}>{role === 'Driver' ? 'My Load' : 'Load Management'}</Text>{profile && loadingLoads ? <Card><Text style={styles.muted}>Loading your loads…</Text></Card> : <>{activeLoads.length === 0 && <Card><Text style={styles.muted}>No assigned loads yet.</Text></Card>}{activeLoads.map((load) => {
+    const rateConfirmations = load.rate_confirmations ?? [];
+    const latestRate = rateConfirmations[0];
+    const deliveryDocuments = load.delivery_documents ?? [];
+    return <Card key={load.id}>
+      <View style={styles.row}><Text style={styles.smallBold}>Load #{load.load_number}</Text><Pill tone="green">{load.status}</Pill></View>
+      <Text style={styles.amount}>{money(load.rate_cents / 100)}</Text>
+      <Text style={styles.muted}>Rate confirmation total</Text>
+      <View style={styles.divider} />
+      <Text style={styles.cardTitle}>Pickup</Text><Text style={styles.body}>{load.pickup_name || '—'} • {load.pickup_address || '—'}</Text>
+      <Text style={styles.cardTitle}>Delivery</Text><Text style={styles.body}>{load.delivery_name || '—'}</Text>
+      {latestRate && <>
+        <Pressable style={styles.outline} onPress={() => openDocument(() => getRateConfirmationUrl(latestRate.storage_path))}><Text style={styles.outlineText}>View rate confirmation</Text></Pressable>
+        <Text style={styles.timestampNote}>Sent {new Date(latestRate.created_at).toLocaleString()}{rateConfirmations.length > 1 ? ` · updated ${rateConfirmations.length - 1} time${rateConfirmations.length - 1 === 1 ? '' : 's'} since` : ''}</Text>
+      </>}
+      {profile && (profile.role === 'dispatcher' || profile.role === 'admin') && <Pressable style={styles.primary} onPress={() => attachRateConfirmation(load.id, !!latestRate)}><Text style={styles.primaryText}>{latestRate ? 'Update rate confirmation PDF' : 'Send rate confirmation PDF'}</Text></Pressable>}
+      <View style={styles.divider} />
+      <Text style={styles.cardTitle}>Delivery documents</Text>
+      {(['pod', 'bol'] as const).map((type) => {
+        const docs = deliveryDocuments.filter((doc: any) => doc.document_type === type);
+        const isBusy = uploadingDoc === `${load.id}:${type}`;
+        return <View key={type} style={styles.deliveryDocRow}>
+          <View style={styles.row}>
+            <Text style={styles.body}>{DELIVERY_DOC_LABELS[type]}{docs.length > 0 ? ` (${docs.length})` : ''}</Text>
+            {role === 'Driver' && profile && <Pressable onPress={() => uploadDelivery(load.id, type)} disabled={isBusy} accessibilityRole="button"><Text style={styles.link}>{isBusy ? 'Uploading…' : docs.length > 0 ? 'Add another photo' : 'Upload photo'}</Text></Pressable>}
+          </View>
+          {docs.length === 0 ? <Text style={styles.muted}>None uploaded yet.</Text> : docs.map((doc: any) => (
+            <Pressable key={doc.id} onPress={() => openDocument(() => getDeliveryDocumentUrl(doc.storage_path))}>
+              <Text style={styles.textButtonText}>View photo · {new Date(doc.created_at).toLocaleString()}</Text>
+            </Pressable>
+          ))}
+        </View>;
+      })}
+    </Card>;
+  })}</>}</>;
 }
 
 function Receipts({ profile, fuel, setFuel, receiptUri, setReceiptUri }: { profile: Profile | null; fuel: number; setFuel: (amount: number) => void; receiptUri: string | null; setReceiptUri: (uri: string | null) => void }) {
@@ -644,7 +851,101 @@ function Tracking({ role, profile, trackingAllowed, onDuty, locationLabel, setLo
 
 function Settings({ role }: { role: Role }) {
   if (role !== 'Admin') return <Text style={styles.title}>Settings available to admins only.</Text>;
-  return <><Text style={styles.title}>Admin Controls</Text><Text style={styles.screenLead}>Assign employee roles and issue secure invitations from here.</Text><InviteManager /><Card><Text style={styles.cardTitle}>Driver tracking</Text><Text style={styles.muted}>Turn tracking on or off for a specific driver from the Track tab, where every change is confirmed before it happens and recorded in the audit log.</Text></Card></>;
+  return <><Text style={styles.title}>Admin Controls</Text><Text style={styles.screenLead}>Assign employee roles and issue secure invitations from here.</Text><InviteManager /><Card><Text style={styles.cardTitle}>Driver tracking</Text><Text style={styles.muted}>Turn tracking on or off for a specific driver from the Track tab, where every change is confirmed before it happens and recorded in the audit log.</Text></Card><EmployeeActivity /></>;
+}
+
+/** Lets an admin open a driver's or dispatcher's profile and see everything they've uploaded, each item time-stamped. */
+function EmployeeActivity() {
+  const [people, setPeople] = useState<Profile[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [receiptsList, setReceiptsList] = useState<any[]>([]);
+  const [inspectionsList, setInspectionsList] = useState<any[]>([]);
+  const [deliveryDocsList, setDeliveryDocsList] = useState<any[]>([]);
+  const [rateConfirmationsList, setRateConfirmationsList] = useState<any[]>([]);
+  const [loadingActivity, setLoadingActivity] = useState(false);
+
+  useEffect(() => {
+    Promise.all([loadActiveDrivers(), loadActiveDispatchers()]).then(([drivers, dispatchers]) => {
+      const combined = [...drivers, ...dispatchers];
+      setPeople(combined);
+      setSelectedId((current) => current ?? combined[0]?.id ?? null);
+    }).catch(() => undefined);
+  }, []);
+
+  const selected = people.find((person) => person.id === selectedId) ?? null;
+
+  useEffect(() => {
+    if (!selected) return;
+    let active = true;
+    setLoadingActivity(true);
+    const driverTasks = selected.role === 'driver'
+      ? Promise.all([loadReceiptsForDriver(selected.id), loadInspectionsForDriver(selected.id), loadDeliveryDocumentsForDriver(selected.id)])
+      : Promise.resolve([[], [], []] as [any[], any[], any[]]);
+    const rateTask = selected.role === 'dispatcher' ? loadRateConfirmationsForDispatcher(selected.id) : Promise.resolve([]);
+    Promise.all([driverTasks, rateTask]).then(([[r, i, d], rate]) => {
+      if (!active) return;
+      setReceiptsList(r); setInspectionsList(i); setDeliveryDocsList(d); setRateConfirmationsList(rate);
+    }).catch(() => undefined).finally(() => { if (active) setLoadingActivity(false); });
+    return () => { active = false; };
+  }, [selectedId]);
+
+  const openFile = async (getUrl: () => Promise<string>) => {
+    try { await Linking.openURL(await getUrl()); } catch (e) { Alert.alert('Document unavailable', friendlyError(e, 'Please try again.')); }
+  };
+
+  return <Card>
+    <Text style={styles.cardTitle}>Employee activity</Text>
+    <Text style={styles.muted}>Open a driver's or dispatcher's profile to see what they've sent, each time-stamped.</Text>
+    {people.length === 0 ? <Text style={styles.muted}>No active drivers or dispatchers yet.</Text> : (
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+        {people.map((person) => <Pressable key={person.id} onPress={() => setSelectedId(person.id)}><Pill tone={selectedId === person.id ? 'green' : 'blue'}>{(person.full_name || person.email) + ' · ' + person.role}</Pill></Pressable>)}
+      </ScrollView>
+    )}
+    {selected && loadingActivity && <Text style={styles.muted}>Loading activity…</Text>}
+    {selected && !loadingActivity && selected.role === 'driver' && <>
+      <View style={styles.divider} />
+      <Text style={styles.cardTitle}>Fuel receipts ({receiptsList.length})</Text>
+      {receiptsList.length === 0 ? <Text style={styles.muted}>None submitted yet.</Text> : receiptsList.map((item) => (
+        <View key={item.id} style={styles.activityRow}>
+          <View style={styles.row}><Text style={styles.smallBold}>{money(item.amount_cents / 100)} · {item.receipt_type}</Text><Pill tone={item.review_status === 'approved' ? 'green' : item.review_status === 'rejected' ? 'red' : 'blue'}>{item.review_status}</Pill></View>
+          <Text style={styles.timestampNote}>Submitted {new Date(item.created_at).toLocaleString()}</Text>
+          <Pressable onPress={() => openFile(() => getReceiptImageUrl(item.storage_path))}><Text style={styles.link}>View photo →</Text></Pressable>
+        </View>
+      ))}
+      <View style={styles.divider} />
+      <Text style={styles.cardTitle}>Pre-trip inspections ({inspectionsList.length})</Text>
+      {inspectionsList.length === 0 ? <Text style={styles.muted}>None submitted yet.</Text> : inspectionsList.map((item) => (
+        <View key={item.id} style={styles.activityRow}>
+          <View style={styles.row}><Text style={styles.smallBold}>{String(item.inspection_type).replace('_', ' ')}</Text>{item.fault_reported && <Pill tone="red">Fault reported</Pill>}</View>
+          {!!item.comments && <Text style={styles.body}>{item.comments}</Text>}
+          <Text style={styles.timestampNote}>Submitted {new Date(item.created_at).toLocaleString()}</Text>
+          {(item.photo_paths ?? []).map((path: string, index: number) => (
+            <Pressable key={path} onPress={() => openFile(() => getInspectionPhotoUrl(path))}><Text style={styles.link}>View photo {index + 1} →</Text></Pressable>
+          ))}
+        </View>
+      ))}
+      <View style={styles.divider} />
+      <Text style={styles.cardTitle}>Delivery documents ({deliveryDocsList.length})</Text>
+      {deliveryDocsList.length === 0 ? <Text style={styles.muted}>None uploaded yet.</Text> : deliveryDocsList.map((item) => (
+        <View key={item.id} style={styles.activityRow}>
+          <Text style={styles.smallBold}>{DELIVERY_DOC_LABELS[item.document_type as DeliveryDocumentType] ?? item.document_type} · Load #{item.loads?.load_number ?? '—'}</Text>
+          <Text style={styles.timestampNote}>Uploaded {new Date(item.created_at).toLocaleString()}</Text>
+          <Pressable onPress={() => openFile(() => getDeliveryDocumentUrl(item.storage_path))}><Text style={styles.link}>View photo →</Text></Pressable>
+        </View>
+      ))}
+    </>}
+    {selected && !loadingActivity && selected.role === 'dispatcher' && <>
+      <View style={styles.divider} />
+      <Text style={styles.cardTitle}>Rate confirmations sent ({rateConfirmationsList.length})</Text>
+      {rateConfirmationsList.length === 0 ? <Text style={styles.muted}>None sent yet.</Text> : rateConfirmationsList.map((item) => (
+        <View key={item.id} style={styles.activityRow}>
+          <Text style={styles.smallBold}>Load #{item.loads?.load_number ?? '—'}</Text>
+          <Text style={styles.timestampNote}>Sent {new Date(item.created_at).toLocaleString()}</Text>
+          <Pressable onPress={() => openFile(() => getRateConfirmationUrl(item.storage_path))}><Text style={styles.link}>View document →</Text></Pressable>
+        </View>
+      ))}
+    </>}
+  </Card>;
 }
 
 function InviteManager() {
@@ -748,7 +1049,7 @@ const styles = StyleSheet.create({
   inviteDispatcherSelected: { backgroundColor: NAVY, borderColor: NAVY },
   inviteDispatcherName: { color: NAVY, fontSize: 13, fontWeight: '800' },
   loginLegal: { color: '#98A2B3', fontSize: 10, lineHeight: 15, textAlign: 'center', marginTop: 22, paddingHorizontal: 8 },
-  header: { backgroundColor: color.neutral[0], borderBottomWidth: 1, borderColor: '#E6EAF0', paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, headerLandscape: { paddingVertical: 8, paddingHorizontal: 24 }, headerBrand: { color: RED, fontWeight: '900', letterSpacing: 2, fontSize: 20 }, headerSub: { color: NAVY, fontSize: 9, fontWeight: '800', letterSpacing: 1.5 }, profile: { backgroundColor: NAVY, color: 'white', width: 34, height: 34, textAlign: 'center', lineHeight: 34, borderRadius: 17, fontWeight: '800' }, profileMenuBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 }, profileMenu: { position: 'absolute', top: 60, right: 14, minWidth: 210, backgroundColor: color.neutral[0], borderRadius: radius.md, paddingVertical: 8, zIndex: 21, ...shadow.elevated }, profileMenuHeader: { paddingHorizontal: 16, paddingVertical: 8 }, profileMenuName: { color: INK, fontSize: 14, fontWeight: '900' }, profileMenuEmail: { color: color.neutral[500], fontSize: 12, marginTop: 2 }, profileMenuRole: { color: RED, fontSize: 10, fontWeight: '900', letterSpacing: 0.8, marginTop: 6 }, profileMenuDivider: { height: 1, backgroundColor: color.neutral[200], marginVertical: 2 }, profileMenuSignOut: { minHeight: touchTarget.minimum, justifyContent: 'center', paddingHorizontal: 16 }, profileMenuSignOutText: { color: color.status.danger, fontSize: 14, fontWeight: '900' }, content: { padding: layout.screenPadding, gap: 14, paddingBottom: 22 }, contentLandscape: { width: '100%', maxWidth: 920, alignSelf: 'center', paddingHorizontal: 24, paddingTop: 16 }, safeLandscape: { backgroundColor: MIST }, eyebrow: { color: RED, letterSpacing: 1.5, fontSize: 11, fontWeight: '900' }, title: { ...type.title, color: INK, marginBottom: 2 }, card: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, gap: 9, ...shadow.card }, cardTitle: { color: INK, fontSize: 15, fontWeight: '800' }, big: { color: NAVY, fontSize: 21, fontWeight: '900' }, amount: { ...type.money, color: NAVY }, muted: { color: '#667085', fontSize: 13, lineHeight: 19 }, body: { color: INK, fontSize: 14, lineHeight: 21 }, smallBold: { color: INK, fontWeight: '800', fontSize: 14 }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, line: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, paddingVertical: 4 }, divider: { height: 1, backgroundColor: '#E8EDF3', marginVertical: 5 }, pill: { overflow: 'hidden', color: '#145DA0', backgroundColor: '#E5F1FB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: '800' }, greenPill: { color: '#087443', backgroundColor: '#E2F7EC' }, redPill: { color: '#9F1724', backgroundColor: '#FDE8EA' }, primary: { backgroundColor: RED, minHeight: touchTarget.minimum, padding: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, primaryText: { color: 'white', fontWeight: '800' }, outline: { borderWidth: 1, borderColor: NAVY, minHeight: touchTarget.minimum, padding: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 5 }, outlineText: { color: NAVY, fontWeight: '800' }, danger: { backgroundColor: '#FDE8EA', minHeight: touchTarget.minimum, padding: 13, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 4 }, dangerText: { color: '#9F1724', fontWeight: '800' }, label: { color: '#344054', fontSize: 13, fontWeight: '700' }, legal: { color: '#667085', fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }, link: { color: RED, fontWeight: '800', marginTop: 5 }, grid: { flexDirection: 'row', gap: 12 }, action: { flex: 1, backgroundColor: 'white', padding: 15, borderRadius: 16, minHeight: 112, justifyContent: 'space-between' }, actionIcon: { color: RED, fontSize: 25, fontWeight: '900' }, actionText: { color: NAVY, fontWeight: '800', fontSize: 13 }, bubble: { padding: 11, borderRadius: 12, color: INK, fontSize: 13, lineHeight: 18 }, driverBubble: { backgroundColor: '#E8F0FA', alignSelf: 'flex-end' }, dispatchBubble: { backgroundColor: '#F2F4F7', alignSelf: 'flex-start' }, chatPanel: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, height: 380, ...shadow.card }, chatList: { flex: 1 }, chatListContent: { gap: 8, flexGrow: 1, justifyContent: 'flex-end', paddingBottom: 4 }, bubbleWrap: { maxWidth: '82%' }, bubbleWrapStart: { alignSelf: 'flex-start', alignItems: 'flex-start' }, bubbleWrapEnd: { alignSelf: 'flex-end', alignItems: 'flex-end' }, bubbleTime: { color: color.neutral[400], fontSize: 10, marginTop: 2, marginHorizontal: 2 }, compose: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8 }, input: { flex: 1, borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: INK }, send: { backgroundColor: RED, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 11 }, notice: { color: '#667085', fontSize: 12, lineHeight: 18, paddingHorizontal: 4 }, fullInput: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, padding: 11, fontSize: 16, color: INK }, uploadPreview: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#E8EDF3' }, check: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, checkMark: { color: '#087443', fontSize: 18, fontWeight: '900' }, map: { height: 230, borderRadius: 12, overflow: 'hidden' }, nav: { flexDirection: 'row', backgroundColor: 'white', borderTopWidth: 1, borderColor: '#E6EAF0', paddingVertical: 10 }, navLandscape: { paddingVertical: 7, paddingHorizontal: 24 }, navItem: { flex: 1, alignItems: 'center' }, navText: { color: '#667085', fontSize: 11, fontWeight: '700' }, navActive: { color: RED, fontWeight: '900' },
+  header: { backgroundColor: color.neutral[0], borderBottomWidth: 1, borderColor: '#E6EAF0', paddingHorizontal: 18, paddingVertical: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, headerLandscape: { paddingVertical: 8, paddingHorizontal: 24 }, headerBrand: { color: RED, fontWeight: '900', letterSpacing: 2, fontSize: 20 }, headerSub: { color: NAVY, fontSize: 9, fontWeight: '800', letterSpacing: 1.5 }, profile: { backgroundColor: NAVY, color: 'white', width: 34, height: 34, textAlign: 'center', lineHeight: 34, borderRadius: 17, fontWeight: '800' }, profileMenuBackdrop: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 }, profileMenu: { position: 'absolute', top: 60, right: 14, minWidth: 210, backgroundColor: color.neutral[0], borderRadius: radius.md, paddingVertical: 8, zIndex: 21, ...shadow.elevated }, profileMenuHeader: { paddingHorizontal: 16, paddingVertical: 8 }, profileMenuName: { color: INK, fontSize: 14, fontWeight: '900' }, profileMenuEmail: { color: color.neutral[500], fontSize: 12, marginTop: 2 }, profileMenuRole: { color: RED, fontSize: 10, fontWeight: '900', letterSpacing: 0.8, marginTop: 6 }, profileMenuDivider: { height: 1, backgroundColor: color.neutral[200], marginVertical: 2 }, profileMenuSignOut: { minHeight: touchTarget.minimum, justifyContent: 'center', paddingHorizontal: 16 }, profileMenuSignOutText: { color: color.status.danger, fontSize: 14, fontWeight: '900' }, content: { padding: layout.screenPadding, gap: 14, paddingBottom: 22 }, contentLandscape: { width: '100%', maxWidth: 920, alignSelf: 'center', paddingHorizontal: 24, paddingTop: 16 }, safeLandscape: { backgroundColor: MIST }, eyebrow: { color: RED, letterSpacing: 1.5, fontSize: 11, fontWeight: '900' }, title: { ...type.title, color: INK, marginBottom: 2 }, card: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, gap: 9, ...shadow.card }, cardTitle: { color: INK, fontSize: 15, fontWeight: '800' }, big: { color: NAVY, fontSize: 21, fontWeight: '900' }, amount: { ...type.money, color: NAVY }, muted: { color: '#667085', fontSize: 13, lineHeight: 19 }, body: { color: INK, fontSize: 14, lineHeight: 21 }, smallBold: { color: INK, fontWeight: '800', fontSize: 14 }, row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10 }, line: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 10, paddingVertical: 4 }, divider: { height: 1, backgroundColor: '#E8EDF3', marginVertical: 5 }, pill: { overflow: 'hidden', color: '#145DA0', backgroundColor: '#E5F1FB', borderRadius: 999, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: '800' }, greenPill: { color: '#087443', backgroundColor: '#E2F7EC' }, redPill: { color: '#9F1724', backgroundColor: '#FDE8EA' }, primary: { backgroundColor: RED, minHeight: touchTarget.minimum, padding: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 3 }, primaryText: { color: 'white', fontWeight: '800' }, outline: { borderWidth: 1, borderColor: NAVY, minHeight: touchTarget.minimum, padding: 12, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 5 }, outlineText: { color: NAVY, fontWeight: '800' }, danger: { backgroundColor: '#FDE8EA', minHeight: touchTarget.minimum, padding: 13, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginTop: 4 }, dangerText: { color: '#9F1724', fontWeight: '800' }, label: { color: '#344054', fontSize: 13, fontWeight: '700' }, legal: { color: '#667085', fontSize: 12, textAlign: 'center', marginTop: 18, lineHeight: 18 }, link: { color: RED, fontWeight: '800', marginTop: 5 }, grid: { flexDirection: 'row', gap: 12 }, action: { flex: 1, backgroundColor: 'white', padding: 15, borderRadius: 16, minHeight: 112, justifyContent: 'space-between' }, actionIcon: { color: RED, fontSize: 25, fontWeight: '900' }, actionText: { color: NAVY, fontWeight: '800', fontSize: 13 }, bubble: { padding: 11, borderRadius: 12, color: INK, fontSize: 13, lineHeight: 18 }, driverBubble: { backgroundColor: '#E8F0FA', alignSelf: 'flex-end' }, dispatchBubble: { backgroundColor: '#F2F4F7', alignSelf: 'flex-start' }, chatPanel: { backgroundColor: color.neutral[0], borderRadius: radius.lg, padding: layout.cardPadding, height: 380, ...shadow.card }, chatList: { flex: 1 }, chatListContent: { gap: 8, flexGrow: 1, justifyContent: 'flex-end', paddingBottom: 4 }, bubbleWrap: { maxWidth: '82%' }, bubbleWrapStart: { alignSelf: 'flex-start', alignItems: 'flex-start' }, bubbleWrapEnd: { alignSelf: 'flex-end', alignItems: 'flex-end' }, bubbleTime: { color: color.neutral[400], fontSize: 10, marginTop: 2, marginHorizontal: 2 }, bubbleSender: { color: color.neutral[500], fontSize: 10, fontWeight: '800', marginBottom: 2, marginHorizontal: 2 }, groupManagePanel: { gap: 6, marginTop: 6, paddingTop: 8, borderTopWidth: 1, borderColor: color.neutral[200] }, timestampNote: { color: color.neutral[500], fontSize: 11, marginTop: 2 }, deliveryDocRow: { gap: 4, marginTop: 6 }, activityRow: { gap: 3, paddingVertical: 8, borderBottomWidth: 1, borderColor: color.neutral[100] }, compose: { flexDirection: 'row', gap: 8, alignItems: 'center', marginTop: 8 }, input: { flex: 1, borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 9, color: INK }, send: { backgroundColor: RED, borderRadius: 9, paddingHorizontal: 12, paddingVertical: 11 }, notice: { color: '#667085', fontSize: 12, lineHeight: 18, paddingHorizontal: 4 }, fullInput: { borderWidth: 1, borderColor: '#DDE3EA', borderRadius: 9, padding: 11, fontSize: 16, color: INK }, uploadPreview: { width: '100%', height: 180, borderRadius: 10, backgroundColor: '#E8EDF3' }, check: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }, checkMark: { color: '#087443', fontSize: 18, fontWeight: '900' }, map: { height: 230, borderRadius: 12, overflow: 'hidden' }, nav: { flexDirection: 'row', backgroundColor: 'white', borderTopWidth: 1, borderColor: '#E6EAF0', paddingVertical: 10 }, navLandscape: { paddingVertical: 7, paddingHorizontal: 24 }, navItem: { flex: 1, alignItems: 'center' }, navText: { color: '#667085', fontSize: 11, fontWeight: '700' }, navActive: { color: RED, fontWeight: '900' },
   driverStatusHeader: { backgroundColor: NAVY, borderRadius: radius.lg, padding: layout.cardPadding, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 118 }, driverStatusKicker: { color: '#D5E1F2', fontSize: 10, fontWeight: '900', letterSpacing: 1.2 }, driverStatusTitle: { color: color.neutral[0], fontSize: 25, fontWeight: '900', marginTop: 4 }, driverStatusDetail: { color: '#D5E1F2', fontSize: 12, marginTop: 4, maxWidth: 240 }, dutyToggle: { width: 60, height: 34, borderRadius: 17, backgroundColor: color.neutral[500], padding: 4, justifyContent: 'center' }, dutyToggleOn: { backgroundColor: color.status.success }, dutyToggleDisabled: { opacity: 0.5 }, dutyKnob: { width: 26, height: 26, borderRadius: 13, backgroundColor: color.neutral[0] }, dutyKnobOn: { alignSelf: 'flex-end' }, quickActions: { flexDirection: 'row', gap: 8 }, quickActionPrimary: { backgroundColor: RED, borderRadius: radius.md, padding: 12, minHeight: 76, flex: 1.9, flexDirection: 'row', alignItems: 'center', gap: 9 }, quickAction: { backgroundColor: color.neutral[0], borderRadius: radius.md, padding: 9, minHeight: 76, flex: 1, justifyContent: 'space-between', ...shadow.card }, quickActionIcon: { color: color.neutral[0], fontSize: 22, fontWeight: '900' }, quickActionIconBlue: { color: color.brand.blue, fontSize: 20, fontWeight: '900' }, quickActionTitle: { color: color.neutral[0], fontSize: 12, fontWeight: '900' }, quickActionMeta: { color: '#FAD4D8', fontSize: 10, fontWeight: '700', marginTop: 3 }, quickActionText: { color: NAVY, fontSize: 11, fontWeight: '900' }, cardEyebrow: { color: color.neutral[500], fontSize: 10, letterSpacing: 1.1, fontWeight: '900' }, takeHomeMark: { width: 42, height: 42, backgroundColor: color.status.successSoft, borderRadius: 21, alignItems: 'center', justifyContent: 'center' }, takeHomeMarkText: { color: color.status.success, fontSize: 22, fontWeight: '900' }, earningsMiniRow: { backgroundColor: color.neutral[50], borderRadius: radius.sm, padding: 10, flexDirection: 'row', flexWrap: 'wrap', gap: 3, marginTop: 3 }, earningsMiniLabel: { color: color.neutral[500], fontSize: 11, flexBasis: '62%' }, earningsMiniValue: { color: INK, fontSize: 11, fontWeight: '800', flexBasis: '36%', textAlign: 'right' }, earningsMiniNegative: { color: color.status.danger, fontSize: 11, fontWeight: '800', flexBasis: '36%', textAlign: 'right' }, textButton: { minHeight: touchTarget.minimum, justifyContent: 'center' }, textButtonText: { color: color.brand.blue, fontSize: 13, fontWeight: '900' }, routeRow: { flexDirection: 'row', gap: 12, marginTop: 2 }, routeLine: { alignItems: 'center', width: 16, paddingTop: 7 }, routeDotStart: { height: 10, width: 10, backgroundColor: color.brand.blue, borderRadius: 5 }, routeDash: { width: 2, flex: 1, minHeight: 50, backgroundColor: color.neutral[300], marginVertical: 4 }, routeDotEnd: { height: 10, width: 10, backgroundColor: RED, borderRadius: 5 }, routeDetails: { flex: 1, gap: 1 }, routeLabel: { color: color.neutral[500], fontSize: 10, letterSpacing: 0.9, fontWeight: '900' }, routePlace: { color: INK, fontSize: 14, fontWeight: '900' }, routeAddress: { color: color.neutral[500], fontSize: 12, marginBottom: 10 }, loadFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderTopWidth: 1, borderColor: color.neutral[200], paddingTop: 11, marginTop: 2 }, loadRate: { color: color.status.success, fontSize: 22, fontWeight: '900' }, loadAction: { backgroundColor: color.brand.blueSoft, minHeight: touchTarget.minimum, borderRadius: radius.sm, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center' }, loadActionText: { color: color.brand.blue, fontSize: 12, fontWeight: '900' }, messagePreview: { color: color.neutral[600], fontSize: 12, marginTop: 5, maxWidth: 230, lineHeight: 18 }, messageButton: { minHeight: touchTarget.minimum, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center' }, messageButtonText: { color: color.brand.blue, fontSize: 13, fontWeight: '900' }, locationStrip: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 13, minHeight: 66, backgroundColor: color.brand.blueSoft, borderRadius: radius.md }, locationPin: { color: color.brand.blue, fontSize: 20 }, locationTitle: { color: NAVY, fontSize: 13, fontWeight: '900' }, locationDetail: { color: color.neutral[600], fontSize: 11, marginTop: 3 }, locationArrow: { color: color.brand.blue, fontSize: 28, fontWeight: '400' }, payTimeline: { paddingHorizontal: 2, paddingTop: 3 }, payTimelineLine: { height: 4, borderRadius: 2, backgroundColor: color.neutral[200], overflow: 'hidden' }, payTimelineActive: { height: 4, width: '48%', backgroundColor: color.status.success }, payTimelineText: { color: color.neutral[500], fontSize: 11, marginTop: 8, textAlign: 'center' },
   screenLead: { color: color.neutral[500], fontSize: 14, lineHeight: 20, marginTop: -6, marginBottom: 2 }, approvalActions: { flexDirection: 'row', gap: 8, marginTop: 4 }, approveButton: { flex: 1, minHeight: touchTarget.minimum, justifyContent: 'center', alignItems: 'center', borderRadius: radius.sm, backgroundColor: color.status.success }, approveButtonText: { color: color.neutral[0], fontWeight: '900', fontSize: 12 }, rejectButton: { minHeight: touchTarget.minimum, justifyContent: 'center', alignItems: 'center', borderRadius: radius.sm, backgroundColor: color.status.dangerSoft, paddingHorizontal: 16 }, rejectButtonText: { color: color.status.danger, fontWeight: '900', fontSize: 12 }, receiptHelp: { color: color.neutral[500], fontSize: 13, lineHeight: 19, marginBottom: 5 }, currencyInput: { minHeight: touchTarget.comfortable, borderWidth: 1, borderColor: color.neutral[300], borderRadius: radius.sm, flexDirection: 'row', alignItems: 'center', backgroundColor: color.neutral[50] }, currencyMark: { color: color.neutral[500], fontSize: 18, marginLeft: 14, fontWeight: '700' }, currencyField: { flex: 1, fontSize: 17, color: INK, paddingHorizontal: 8, paddingVertical: 11 }, receiptDropzone: { minHeight: 120, borderWidth: 1.5, borderColor: color.brand.blue, borderStyle: 'dashed', borderRadius: radius.md, backgroundColor: color.brand.blueSoft, alignItems: 'center', justifyContent: 'center' }, receiptCamera: { color: color.brand.blue, fontSize: 24, fontWeight: '900' }, receiptDropzoneTitle: { color: NAVY, fontSize: 14, fontWeight: '900', marginTop: 5 }, receiptDropzoneDetail: { color: color.neutral[600], fontSize: 12, marginTop: 2 }, paymentBanner: { backgroundColor: NAVY, borderRadius: radius.lg, padding: layout.cardPadding, gap: 4 }, paymentBannerLabel: { color: '#D5E1F2', fontSize: 10, fontWeight: '900', letterSpacing: 1.1 }, paymentBannerDate: { color: color.neutral[0], fontSize: 20, fontWeight: '900' }, paymentBannerDetail: { color: '#D5E1F2', fontSize: 12 }, earningsFlowRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }, earningsFlowValue: { color: color.status.success, fontSize: 26, fontWeight: '900' }, earningsCost: { color: color.status.danger, fontSize: 26, fontWeight: '900' }, earningsFlowSymbol: { color: color.neutral[400], fontSize: 23, fontWeight: '600' }, netResult: { backgroundColor: color.status.successSoft, borderRadius: radius.sm, padding: 12, marginTop: 4 }, netResultLabel: { color: color.status.success, fontSize: 10, fontWeight: '900', letterSpacing: 1 }, netResultValue: { color: color.status.success, fontSize: 25, fontWeight: '900', marginTop: 3 }, percentageControl: { minHeight: touchTarget.comfortable, borderWidth: 2, borderColor: color.brand.blue, borderRadius: radius.sm, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, marginTop: 3 }, percentageInput: { flex: 1, fontSize: 22, fontWeight: '900', color: NAVY, paddingVertical: 9 }, percentageSuffix: { color: color.brand.blue, fontSize: 20, fontWeight: '900' }, takeHomeResult: { color: color.status.success, fontSize: 34, fontWeight: '900', marginTop: 3 },
   headerComfortable: { paddingTop: 18, paddingBottom: 16 }, headerRole: { color: color.neutral[500], fontSize: 8, fontWeight: '900', letterSpacing: 0.9, marginTop: 3 }, roleAssignmentNotice: { color: color.brand.blue, backgroundColor: color.brand.blueSoft, borderRadius: radius.sm, padding: 10, fontSize: 12, fontWeight: '900' }, navComfortable: { paddingTop: 9, paddingBottom: 18, minHeight: 76 }, navItemComfortable: { minHeight: 49, justifyContent: 'center', paddingHorizontal: 3 }, navTextComfortable: { fontSize: 13, letterSpacing: 0.1 },

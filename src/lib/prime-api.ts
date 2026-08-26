@@ -17,7 +17,7 @@ function extensionFor(uri: string) {
   return extension && /^[a-z0-9]{2,5}$/.test(extension) ? extension : 'jpg';
 }
 
-async function uploadPrivateImage(bucket: 'receipts' | 'inspection-photos', ownerId: string, uri: string, prefix: string) {
+async function uploadPrivateImage(bucket: 'receipts' | 'inspection-photos' | 'delivery-documents', ownerId: string, uri: string, prefix: string) {
   const response = await fetch(uri);
   if (!response.ok) throw new Error('The selected image could not be read.');
   const blob = await response.blob();
@@ -103,7 +103,12 @@ export async function getMyProfile(id: string): Promise<Profile> {
 }
 
 export async function loadMyLoads() {
-  const { data, error } = await client().from('loads').select('id, load_number, rate_cents, pickup_name, pickup_address, pickup_at, delivery_name, delivery_address, delivery_at, status, rate_confirmations(id, storage_path, original_filename, acknowledged_at)').order('created_at', { ascending: false });
+  const { data, error } = await client()
+    .from('loads')
+    .select('id, load_number, rate_cents, pickup_name, pickup_address, pickup_at, delivery_name, delivery_address, delivery_at, status, rate_confirmations(id, storage_path, original_filename, acknowledged_at, uploaded_by, created_at), delivery_documents(id, document_type, storage_path, original_filename, driver_id, created_at)')
+    .order('created_at', { ascending: false })
+    .order('created_at', { referencedTable: 'rate_confirmations', ascending: false })
+    .order('created_at', { referencedTable: 'delivery_documents', ascending: false });
   if (error) throw error;
   return data ?? [];
 }
@@ -114,6 +119,14 @@ export async function getRateConfirmationUrl(storagePath: string) {
   return data.signedUrl;
 }
 
+/**
+ * Uploads a rate confirmation for a load. Calling this again for a load that
+ * already has one adds a new, separately timestamped version rather than
+ * overwriting - the previous version(s) remain visible to admins/dispatch,
+ * and the newest is treated as current. This is how a dispatcher "updates"
+ * a rate confirmation when a broker resends one under the same load/document
+ * number with revised terms.
+ */
 export async function uploadRateConfirmation(input: { loadId: string; uploadedBy: string; uri: string; filename: string; mimeType?: string | null }) {
   const response = await fetch(input.uri);
   if (!response.ok) throw new Error('The selected rate confirmation could not be read.');
@@ -123,6 +136,17 @@ export async function uploadRateConfirmation(input: { loadId: string; uploadedBy
   if (uploadError) throw uploadError;
   const { error } = await client().from('rate_confirmations').insert({ load_id: input.loadId, storage_path: storagePath, original_filename: input.filename, uploaded_by: input.uploadedBy });
   if (error) throw error;
+}
+
+/** All rate confirmations a specific dispatcher has sent, newest first, for the admin activity view. */
+export async function loadRateConfirmationsForDispatcher(dispatcherId: string) {
+  const { data, error } = await client()
+    .from('rate_confirmations')
+    .select('id, load_id, storage_path, original_filename, created_at, loads(load_number)')
+    .eq('uploaded_by', dispatcherId)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data ?? [];
 }
 
 export async function loadReceipts() {
@@ -142,16 +166,66 @@ export async function reviewReceipt(receiptId: string, status: 'approved' | 'rej
   if (error) throw error;
 }
 
+/** A signed link to view one receipt photo. Admins can open any driver's receipt this way. */
+export async function getReceiptImageUrl(storagePath: string) {
+  const { data, error } = await client().storage.from('receipts').createSignedUrl(storagePath, 600);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
+/** All of one driver's receipts, newest first, for the admin activity view. */
+export async function loadReceiptsForDriver(driverId: string) {
+  const { data, error } = await client().from('receipts').select('id, driver_id, load_id, receipt_type, amount_cents, receipt_date, storage_path, notes, review_status, reviewed_by, created_at, updated_at').eq('driver_id', driverId).order('created_at', { ascending: false });
+  if (error) throw error;
+  return data ?? [];
+}
+
 export async function loadInspections() {
   const { data, error } = await client().from('inspection_reports').select('id, driver_id, load_id, inspection_type, checklist, comments, fault_reported, photo_paths, created_at').order('created_at', { ascending: false });
   if (error) throw error;
   return data ?? [];
 }
 
+/** All of one driver's pre-trip/post-trip inspections, newest first, for the admin activity view. */
+export async function loadInspectionsForDriver(driverId: string) {
+  const { data, error } = await client().from('inspection_reports').select('id, driver_id, load_id, inspection_type, checklist, comments, fault_reported, photo_paths, created_at').eq('driver_id', driverId).order('created_at', { ascending: false });
+  if (error) throw error;
+  return data ?? [];
+}
+
+/** A signed link to view one inspection photo. Admins can open any driver's inspection photo this way. */
+export async function getInspectionPhotoUrl(storagePath: string) {
+  const { data, error } = await client().storage.from('inspection-photos').createSignedUrl(storagePath, 600);
+  if (error) throw error;
+  return data.signedUrl;
+}
+
 export async function submitInspection(input: { driverId: string; inspectionType: InspectionType; checklist: Record<string, boolean>; comments?: string; faultReported: boolean; photoUris?: string[]; loadId?: string }) {
   const photoPaths = await Promise.all((input.photoUris ?? []).map((uri, index) => uploadPrivateImage('inspection-photos', input.driverId, uri, `inspection-${index}`)));
   const { error } = await client().from('inspection_reports').insert({ driver_id: input.driverId, load_id: input.loadId ?? null, inspection_type: input.inspectionType, checklist: input.checklist, comments: input.comments ?? null, fault_reported: input.faultReported, photo_paths: photoPaths });
   if (error) throw error;
+}
+
+export type DeliveryDocumentType = 'pod' | 'bol';
+
+/** A driver sending a clear photo of the Proof of Delivery or Bill of Lading for a load. */
+export async function uploadDeliveryDocument(input: { loadId: string; driverId: string; documentType: DeliveryDocumentType; uri: string; filename?: string }) {
+  const storagePath = await uploadPrivateImage('delivery-documents', input.driverId, input.uri, input.documentType);
+  const { error } = await client().from('delivery_documents').insert({ load_id: input.loadId, driver_id: input.driverId, document_type: input.documentType, storage_path: storagePath, original_filename: input.filename ?? null, uploaded_by: input.driverId });
+  if (error) throw error;
+}
+
+/** All of one driver's POD/BOL uploads, newest first, for the admin activity view. */
+export async function loadDeliveryDocumentsForDriver(driverId: string) {
+  const { data, error } = await client().from('delivery_documents').select('id, load_id, driver_id, document_type, storage_path, original_filename, created_at, loads(load_number)').eq('driver_id', driverId).order('created_at', { ascending: false });
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function getDeliveryDocumentUrl(storagePath: string) {
+  const { data, error } = await client().storage.from('delivery-documents').createSignedUrl(storagePath, 600);
+  if (error) throw error;
+  return data.signedUrl;
 }
 
 export async function loadWeeklyEarnings() {
@@ -185,6 +259,50 @@ export async function sendThreadMessage(threadId: string, senderId: string, body
 
 export function subscribeToThread(threadId: string, onMessage: (message: AppMessage) => void) {
   return client().channel(`thread:${threadId}`).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `thread_id=eq.${threadId}` }, (payload) => onMessage(payload.new as AppMessage)).subscribe();
+}
+
+export type ChatThreadSummary = { id: string; title: string | null; is_group: boolean; created_at: string };
+
+/** Creates a WhatsApp-style group thread. Admin-only at the database layer; the creator is always included as a member. */
+export async function createGroupThread(title: string, memberIds: string[], creatorId: string) {
+  const { data: thread, error: threadError } = await client().from('chat_threads').insert({ title, is_group: true, created_by: creatorId }).select('id').single();
+  if (threadError) throw threadError;
+  const uniqueMemberIds = [...new Set([creatorId, ...memberIds])];
+  const { error: memberError } = await client().from('chat_members').insert(uniqueMemberIds.map((profile_id) => ({ thread_id: thread.id, profile_id })));
+  if (memberError) throw memberError;
+  return thread.id as string;
+}
+
+/** Every thread (direct or group) the given profile currently belongs to. */
+export async function loadMyThreads(profileId: string) {
+  const { data, error } = await client().from('chat_members').select('thread_id, chat_threads(id, title, is_group, created_at)').eq('profile_id', profileId);
+  if (error) throw error;
+  return (data ?? []).map((row: any) => row.chat_threads).filter(Boolean) as ChatThreadSummary[];
+}
+
+/**
+ * The current members of one thread, for display and for the add/remove
+ * participants panel. Uses list_thread_members() rather than a direct table
+ * query: chat_members' own RLS only exposes the caller's own membership row
+ * (by design, see 014_group_chat_management.sql), so listing co-members
+ * needs the scoped RPC instead.
+ */
+export async function loadThreadMembers(threadId: string) {
+  const { data, error } = await client().rpc('list_thread_members', { thread_id: threadId });
+  if (error) throw error;
+  return (data ?? []) as (Profile & { joined_at: string })[];
+}
+
+/** Admin, or a dispatcher already in the group, adding a participant. Enforced by RLS either way. */
+export async function addThreadMember(threadId: string, profileId: string) {
+  const { error } = await client().from('chat_members').insert({ thread_id: threadId, profile_id: profileId });
+  if (error) throw error;
+}
+
+/** Admin, or a dispatcher already in the group, removing a participant. Enforced by RLS either way. */
+export async function removeThreadMember(threadId: string, profileId: string) {
+  const { error } = await client().from('chat_members').delete().eq('thread_id', threadId).eq('profile_id', profileId);
+  if (error) throw error;
 }
 
 export async function getTrackingSettings(driverId: string) {

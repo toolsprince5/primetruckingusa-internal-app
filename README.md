@@ -13,6 +13,10 @@ This is the first cross-platform Expo/React Native build for the employee portal
 - Pre-trip checks/fault-report interaction.
 - Receipt-library picker and inspection-camera capture in the native preview.
 - Current-location refresh, tracking indicator, and administrator tracking toggle.
+- Driver upload of Proof of Delivery (POD) and Bill of Lading (BOL) photos per load.
+- Dispatcher rate-confirmation updates: re-sending a rate confirmation for a load adds a new, separately time-stamped version instead of losing the previous one - for when a broker resends the same load/document number with revised terms.
+- Admin "Employee activity" view (Admin Controls → Employee activity): open any driver's or dispatcher's profile and see everything they've uploaded - receipts, pre-trip comments and photos, POD/BOL, or rate confirmations sent - each entry time-stamped.
+- WhatsApp-style group messaging: Admins create groups; Admins and Dispatchers who already belong to a group can add or remove its participants.
 
 ## Running it
 
@@ -39,16 +43,28 @@ The Expo app now includes a secure Supabase client, secure mobile session storag
 
 ## Required before inviting employees
 
-1. Apply `supabase/009_invite_only_identity_and_data_boundaries.sql` through `supabase/012_driver_duty_status.sql`, in order, in Supabase SQL Editor. 010 makes an admin's "tracking off" a real database rule instead of a client-side setting; 011 adds an append-only audit trail for tracking changes and receipt reviews, queryable by admins directly in Supabase; 012 splits tracking into an admin-owned override and a driver-owned on-duty status, so a driver's own "on duty" switch has a real column to write to without being able to touch the admin's override.
+1. Apply `supabase/009_invite_only_identity_and_data_boundaries.sql` through `supabase/014_group_chat_management.sql`, in order, in Supabase SQL Editor.
+   - 010 makes an admin's "tracking off" a real database rule instead of a client-side setting.
+   - 011 adds an append-only audit trail for tracking changes and receipt reviews, queryable by admins directly in Supabase.
+   - 012 splits tracking into an admin-owned override and a driver-owned on-duty status, so a driver's own "on duty" switch has a real column to write to without being able to touch the admin's override.
+   - 013 adds the `delivery_documents` table and private `delivery-documents` storage bucket for driver-uploaded POD/BOL photos.
+   - 014 lets a dispatcher who already belongs to a group manage its participants (add/remove), alongside admins, and adds the `list_thread_members` function group chat needs to show who's in a thread.
 2. Deploy `create-employee-invite` and `claim-employee-invite` Edge Functions.
 3. Set `RESEND_API_KEY` and `INVITE_FROM_EMAIL` as Edge Function secrets. Without those two settings, an Admin can still securely share the generated invite link from the app.
 4. In Supabase **Authentication → Providers → Email**, disable public sign-ups. Admin accounts remain owner-controlled; Drivers and Dispatchers are created only by the one-time invite function.
-5. In Supabase **Authentication → URL Configuration → Redirect URLs**, add `primetruckingusa://reset-password` so self-service password-reset links are allowed to open the app. Without this, Supabase will not deliver the reset email to that link.
+5. Set up password-reset delivery per `WEB_PASSWORD_RESET_SETUP.md` - deploy the `web/reset-password/` page and add its HTTPS URL as an allowed redirect URL in Supabase Authentication settings. Without this, Supabase will not deliver the reset email to that link.
 6. Build a new Android/iOS app after applying the configuration above.
 
 ## Self-service password reset
 
-Employees can reset their own password from the sign-in screen ("Forgot password?") without an administrator. It uses Supabase Auth's built-in `resetPasswordForEmail`, which emails a one-time link back into the app via the `primetruckingusa://reset-password` deep link; the app's existing recovery screen then completes the change. Supabase intentionally returns the same response whether or not the address has an account, so the app never confirms or denies which work emails exist. Delivery depends on the SMTP/email provider configured in Supabase Auth — see "Production integrations still required" below.
+Employees can reset their own password from the sign-in screen ("Forgot password?") without an administrator. It uses Supabase Auth's built-in `resetPasswordForEmail`, which emails a one-time link to `https://primetruckingusa.com/reset-password/` (see `WEB_PASSWORD_RESET_SETUP.md`); that page works in any browser and offers an "Open in app" action that hands off to the same in-app recovery screen for anyone with the app installed. Supabase intentionally returns the same response whether or not the address has an account, so the app never confirms or denies which work emails exist. Delivery depends on the SMTP/email provider configured in Supabase Auth — see "Production integrations still required" below.
+
+## Admin oversight and group messaging
+
+- **Employee activity** (Admin Controls → Employee activity): an admin picks any active driver or dispatcher and sees what they've sent - a driver's fuel receipts, pre-trip inspection comments/photos, and POD/BOL uploads, or a dispatcher's sent rate confirmations - every entry with the time it was submitted. This reads existing per-employee data through the same row-level security every other screen already uses (an admin already sees all rows; the queries just add a `driver_id`/`uploaded_by` filter), so it needed no new access rules, only new read functions.
+- **Rate confirmation updates**: dispatchers/admins can re-send a rate confirmation for a load that already has one; the new file becomes the current version and the previous version(s) stay on record with their own time stamp, so a broker resending the same load under revised terms doesn't erase what was there before.
+- **Proof of Delivery / Bill of Lading**: the assigned driver can upload clear photos of the POD and BOL for their load from the Loads screen; each upload is private, time-stamped, and visible to the admin and the load's dispatcher.
+- **Group messaging**: from Messages, an Admin can start a group (name + participants) with "+ New group". Group creation is admin-only at the database layer. Once created, an Admin or a Dispatcher who already belongs to that group can open "Manage participants" to add or remove people; a dispatcher who isn't yet a member of a group cannot add themselves or anyone else to it.
 
 ## Production integrations still required
 
