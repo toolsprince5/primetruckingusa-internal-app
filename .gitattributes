@@ -1,0 +1,5 @@
+# Shell scripts run on Linux EAS Build workers regardless of which OS a
+# contributor commits from. Force LF line endings so a CRLF checkout on
+# Windows never breaks the shebang line there (a CRLF-mangled shebang fails
+# with a "bad interpreter" error on Linux).
+*.sh text eol=lf
