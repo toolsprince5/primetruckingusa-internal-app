@@ -323,15 +323,54 @@ export async function setDriverDutyStatus(driverId: string, onDuty: boolean) {
   if (error) throw error;
 }
 
-export async function saveLocation(driverId: string, latitude: number, longitude: number) {
-  const { error } = await client().from('location_events').insert({ driver_id: driverId, latitude, longitude });
+export type DriverLocation = {
+  id?: string;
+  driver_id: string;
+  latitude: number;
+  longitude: number;
+  accuracy_meters?: number | null;
+  heading_degrees?: number | null;
+  speed_mps?: number | null;
+  recorded_at: string;
+};
+
+export async function saveLocationTelemetry(input: {
+  driverId: string;
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+  heading?: number | null;
+  speed?: number | null;
+  recordedAt?: string;
+}) {
+  const { error } = await client().from('location_events').insert({
+    driver_id: input.driverId,
+    latitude: input.latitude,
+    longitude: input.longitude,
+    accuracy_meters: input.accuracy ?? null,
+    heading_degrees: input.heading ?? null,
+    speed_mps: input.speed ?? null,
+    recorded_at: input.recordedAt ?? new Date().toISOString(),
+  });
   if (error) throw error;
 }
 
 export async function loadLatestLocations() {
-  const { data, error } = await client().from('location_events').select('id, driver_id, latitude, longitude, recorded_at').order('recorded_at', { ascending: false }).limit(100);
+  const { data, error } = await client().from('location_events').select('id, driver_id, latitude, longitude, accuracy_meters, heading_degrees, speed_mps, recorded_at').order('recorded_at', { ascending: false }).limit(250);
   if (error) throw error;
   const newestByDriver = new Map<string, any>();
   for (const item of data ?? []) if (!newestByDriver.has(item.driver_id)) newestByDriver.set(item.driver_id, item);
   return [...newestByDriver.values()];
+}
+
+export function subscribeToFleetLocations(onLocation: (location: DriverLocation) => void) {
+  return client().channel('fleet-location-events')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'location_events' }, (payload) => onLocation(payload.new as DriverLocation))
+    .subscribe();
+}
+
+export function subscribeToTrackingSetting(driverId: string, onChange: (setting: { enabled: boolean; on_duty: boolean }) => void) {
+  return client().channel(`tracking:${driverId}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'tracking_settings', filter: `driver_id=eq.${driverId}` }, (payload) => onChange(payload.new as { enabled: boolean; on_duty: boolean }))
+    .subscribe();
 }

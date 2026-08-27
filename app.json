@@ -11,7 +11,11 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Prime Trucking USA uses your location while you are on duty so dispatch can coordinate your assigned load."
+          "locationWhenInUsePermission": "Prime Trucking USA uses your location while you are on duty so dispatch can coordinate your assigned load.",
+          "locationAlwaysAndWhenInUsePermission": "Prime Trucking USA continues sharing your truck location while you are on duty, including when the app is in the background.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [
@@ -36,7 +40,9 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Prime Trucking USA uses the microphone for authorized voice and video calls.",
-        "NSCameraUsageDescription": "Prime Trucking USA uses the camera for receipt and inspection photos, and authorized video calls."
+        "NSCameraUsageDescription": "Prime Trucking USA uses the camera for receipt and inspection photos, and authorized video calls.",
+        "NSLocationWhenInUseUsageDescription": "Prime Trucking USA uses your location while you are on duty so dispatch can coordinate your assigned load.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Prime Trucking USA continues sharing your truck location while you are on duty, including when the app is in the background."
       }
     },
     "android": {
@@ -45,10 +51,15 @@
       "permissions": [
         "ACCESS_COARSE_LOCATION",
         "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
         "CAMERA",
         "RECORD_AUDIO",
         "POST_NOTIFICATIONS"
-      ]
+      ],
+      "isAndroidBackgroundLocationEnabled": true,
+      "isAndroidForegroundServiceEnabled": true
     },
     "extra": {
       "eas": {

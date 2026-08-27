@@ -94,6 +94,7 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1
         versionName "0.1.0"
+        manifestPlaceholders = [googleMapsApiKey: System.getenv("EXPO_PUBLIC_GOOGLE_MAPS_ANDROID_KEY") ?: ""]
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }

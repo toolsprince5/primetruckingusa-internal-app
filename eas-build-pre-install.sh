@@ -27,6 +27,7 @@ if [ -n "${GOOGLE_SERVICES_JSON:-}" ] && [ -f "$GOOGLE_SERVICES_JSON" ]; then
   echo "Copying google-services.json into android/app/"
   cp "$GOOGLE_SERVICES_JSON" android/app/google-services.json
 else
-  echo "GOOGLE_SERVICES_JSON is not set, or does not point to a real file - skipping." >&2
-  echo "Android builds that apply com.google.gms.google-services will fail without it." >&2
+  echo "GOOGLE_SERVICES_JSON is not set, or does not point to a real file." >&2
+  echo "Stopping before dependency installation because Android cannot compile without Firebase configuration." >&2
+  exit 1
 fi

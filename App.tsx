@@ -10,7 +10,6 @@ import {
   PermissionsAndroid,
   Platform,
   Pressable,
-  SafeAreaView,
   Share,
   ScrollView,
   StyleSheet,
@@ -19,6 +18,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import * as DocumentPicker from 'expo-document-picker';
@@ -49,7 +49,6 @@ import {
   loadWeeklyEarnings,
   removeThreadMember,
   reviewReceipt,
-  saveLocation,
   saveReceipt,
   sendThreadMessage,
   setDriverDutyStatus,
@@ -65,6 +64,9 @@ import {
   signOut,
   submitInspection,
   subscribeToThread,
+  subscribeToFleetLocations,
+  subscribeToTrackingSetting,
+  saveLocationTelemetry,
   uploadDeliveryDocument,
   type AppMessage,
   type ChatThreadSummary,
@@ -72,6 +74,7 @@ import {
   type Profile,
   uploadRateConfirmation,
 } from './src/lib/prime-api';
+import { startDriverTracking, stopDriverTracking, type TrackingState } from './src/lib/tracking';
 import { registerPushDevice } from './src/lib/notifications';
 import { clearCallingProfile, connectStreamVideo, saveCallingProfile } from './src/lib/stream-video';
 import { color, layout, radius, shadow, space, touchTarget, type } from './src/design/tokens';
@@ -139,6 +142,11 @@ function PasswordField({ value, onChangeText, placeholder, onSubmitEditing, newP
 }
 
 export default function App() {
+  return <SafeAreaProvider><PrimeApp /></SafeAreaProvider>;
+}
+
+function PrimeApp() {
+  const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   const [role, setRole] = useState<Role>('Driver');
@@ -177,6 +185,7 @@ export default function App() {
   const [locationLabel, setLocationLabel] = useState('Driver • location not yet refreshed');
   const [locationCoords, setLocationCoords] = useState({ latitude: 41.6528, longitude: -83.5379 });
   const [streamClient, setStreamClient] = useState<StreamVideoClient | null>(null);
+  const [trackingState, setTrackingState] = useState<TrackingState>('idle');
 
   const loadTotal = 2900;
   const net = useMemo(() => loadTotal - fuel, [fuel]);
@@ -260,6 +269,31 @@ export default function App() {
       setOnDuty(setting.on_duty ?? true);
     }).catch(() => undefined);
   }, [authenticatedProfile?.id]);
+
+  useEffect(() => {
+    if (!authenticatedProfile || authenticatedProfile.role !== 'driver') return;
+    const channel = subscribeToTrackingSetting(authenticatedProfile.id, (setting) => {
+      setTrackingAllowed(setting.enabled);
+      setOnDuty(setting.on_duty);
+    });
+    return () => { void supabase?.removeChannel(channel); };
+  }, [authenticatedProfile?.id]);
+
+  useEffect(() => {
+    if (!authenticatedProfile || authenticatedProfile.role !== 'driver' || !trackingAllowed || !onDuty) {
+      void stopDriverTracking().finally(() => setTrackingState('idle'));
+      return;
+    }
+    let active = true;
+    setTrackingState('starting');
+    startDriverTracking((location) => {
+      if (!active) return;
+      setLocationCoords({ latitude: location.coords.latitude, longitude: location.coords.longitude });
+      setLocationLabel(`Driver • updated ${new Date(location.timestamp).toLocaleTimeString()}`);
+    }).then((state) => { if (active) setTrackingState(state); })
+      .catch(() => { if (active) setTrackingState('offline'); });
+    return () => { active = false; void stopDriverTracking(); };
+  }, [authenticatedProfile?.id, trackingAllowed, onDuty]);
 
   useEffect(() => {
     let active = true;
@@ -379,6 +413,7 @@ export default function App() {
   };
 
   const leaveApp = async () => {
+    await stopDriverTracking().catch(() => undefined);
     if (authenticatedProfile) {
       try { await streamClient?.disconnectUser(); } catch { /* Sign-out still works when Stream is unavailable. */ }
       try { await StreamVideoRN.onPushLogout(); } catch { /* Stream device cleanup is best-effort. */ }
@@ -394,7 +429,7 @@ export default function App() {
 
   if (!signedIn) {
     return (
-      <SafeAreaView style={[styles.loginSafe, isLandscape && styles.loginSafeLandscape]}>
+      <SafeAreaView edges={['top', 'bottom', 'left', 'right']} style={[styles.loginSafe, isLandscape && styles.loginSafeLandscape]}>
         <StatusBar style="light" />
         <KeyboardAvoidingView style={styles.loginShell} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <ScrollView contentContainerStyle={[styles.loginScroll, isLandscape && styles.loginScrollLandscape]} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
@@ -452,8 +487,9 @@ export default function App() {
     : [{ key: 'home', title: 'Home' }, { key: 'messages', title: 'Messages' }, { key: 'loads', title: 'Loads' }, { key: 'tracking', title: 'Map' }, { key: 'settings', title: 'Admin' }];
 
   const workspace = (
-    <SafeAreaView style={[styles.safe, isLandscape && styles.safeLandscape]}>
+    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.safe, isLandscape && styles.safeLandscape]}>
       <StatusBar style="dark" />
+      <KeyboardAvoidingView style={styles.workspace} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={[styles.header, styles.headerComfortable, isLandscape && styles.headerLandscape]}>
         <View><Text style={styles.headerBrand}>PRIME</Text><Text style={styles.headerSub}>TRUCKING USA</Text><Text style={styles.headerRole}>SIGNED IN AS {role.toUpperCase()}</Text></View>
         <Pressable onPress={() => setProfileMenuOpen(true)} accessibilityRole="button" accessibilityLabel="Account menu"><Text style={styles.profile}>{person.name.slice(0, 1)}</Text></Pressable>
@@ -470,17 +506,18 @@ export default function App() {
           <Pressable style={styles.profileMenuSignOut} onPress={() => { setProfileMenuOpen(false); leaveApp(); }} accessibilityRole="button"><Text style={styles.profileMenuSignOutText}>Sign out</Text></Pressable>
         </View>
       </>}
-      <ScrollView contentContainerStyle={[styles.content, isLandscape && styles.contentLandscape]}>
+      <ScrollView contentContainerStyle={[styles.content, isLandscape && styles.contentLandscape]} keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}>
         {screen === 'home' && <Home role={role} profile={authenticatedProfile} setScreen={setScreen} net={net} onDuty={onDuty} setOnDuty={setOnDuty} trackingAllowed={trackingAllowed} />}
         {screen === 'messages' && <Messages role={role} profile={authenticatedProfile} messages={messages} message={message} setMessage={setMessage} sendMessage={sendMessage} onStartCall={startDirectCall} callingReady={!!streamClient} />}
         {screen === 'loads' && <Loads role={role} profile={authenticatedProfile} />}
         {screen === 'receipts' && <Receipts profile={authenticatedProfile} fuel={fuel} setFuel={setFuel} receiptUri={receiptUri} setReceiptUri={setReceiptUri} />}
         {screen === 'earnings' && <Earnings profile={authenticatedProfile} net={net} fuel={fuel} percentage={percentage} setPercentage={setPercentage} takeHome={takeHome} />}
         {screen === 'inspections' && <Inspections profile={authenticatedProfile} inspectionUri={inspectionUri} setInspectionUri={setInspectionUri} />}
-        {screen === 'tracking' && <Tracking role={role} profile={authenticatedProfile} trackingAllowed={trackingAllowed} onDuty={onDuty} locationLabel={locationLabel} setLocationLabel={setLocationLabel} locationCoords={locationCoords} setLocationCoords={setLocationCoords} />}
+        {screen === 'tracking' && <Tracking role={role} profile={authenticatedProfile} trackingAllowed={trackingAllowed} onDuty={onDuty} trackingState={trackingState} locationLabel={locationLabel} setLocationLabel={setLocationLabel} locationCoords={locationCoords} setLocationCoords={setLocationCoords} />}
         {screen === 'settings' && <Settings role={role} />}
       </ScrollView>
-      <View style={[styles.nav, styles.navComfortable, isLandscape && styles.navLandscape]}>{nav.map((item) => <Pressable key={item.key} style={[styles.navItem, styles.navItemComfortable]} onPress={() => setScreen(item.key)} accessibilityRole="tab" accessibilityState={{ selected: screen === item.key }}><Text style={[styles.navText, styles.navTextComfortable, screen === item.key && styles.navActive]}>{item.title}</Text></Pressable>)}</View>
+      <View style={[styles.nav, styles.navComfortable, { paddingBottom: Math.max(insets.bottom, 10) }, isLandscape && styles.navLandscape]}>{nav.map((item) => <Pressable key={item.key} style={[styles.navItem, styles.navItemComfortable]} onPress={() => setScreen(item.key)} accessibilityRole="tab" accessibilityState={{ selected: screen === item.key }}><Text style={[styles.navText, styles.navTextComfortable, screen === item.key && styles.navActive]}>{item.title}</Text></Pressable>)}</View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
   return streamClient ? <StreamVideo client={streamClient}><StreamPushRegistration />{workspace}<ActiveCallOverlay landscape={isLandscape} /></StreamVideo> : workspace;
@@ -495,7 +532,7 @@ function ActiveCallOverlay({ landscape }: { landscape: boolean }) {
   const calls = useCalls();
   const activeCall = calls.find((call) => call.ringing || call.state.callingState !== CallingState.LEFT);
   if (!activeCall) return null;
-  return <View style={styles.callOverlay}><StreamCall call={activeCall}><RingingCallContent landscape={landscape} onBackPress={() => { void activeCall.leave({ reject: true }).catch(() => undefined); }} /></StreamCall></View>;
+  return <SafeAreaView edges={['top', 'bottom', 'left', 'right']} style={styles.callOverlay}><StreamCall call={activeCall}><RingingCallContent landscape={landscape} onBackPress={() => { void activeCall.leave({ reject: true }).catch(() => undefined); }} /></StreamCall></SafeAreaView>;
 }
 
 function Home({ role, profile, setScreen, net, onDuty, setOnDuty, trackingAllowed }: { role: Role; profile: Profile | null; setScreen: (screen: Screen) => void; net: number; onDuty: boolean; setOnDuty: (value: boolean) => void; trackingAllowed: boolean }) {
@@ -845,14 +882,15 @@ function Inspections({ profile, inspectionUri, setInspectionUri }: { profile: Pr
   return <><Text style={styles.eyebrow}>VEHICLE SAFETY</Text><Text style={styles.title}>Pre-trip check</Text><Card><View style={styles.row}><View><Text style={styles.cardTitle}>{completed} of {items.length} checks complete</Text><Text style={styles.muted}>Complete before beginning your load.</Text></View><Pill tone={completed === items.length ? 'green' : 'blue'}>{completed === items.length ? 'Ready' : 'In progress'}</Pill></View><View style={styles.inspectionProgress}><View style={[styles.inspectionProgressFill, { width: `${(completed / items.length) * 100}%` }]} /></View>{items.map(([key, label]) => <Pressable key={key} style={[styles.check, checks[key] && styles.checkComplete]} onPress={() => setChecks((current) => ({ ...current, [key]: !current[key] }))} accessibilityRole="checkbox" accessibilityState={{ checked: checks[key] }} accessibilityLabel={label}><Text style={styles.checkMark} accessible={false}>{checks[key] ? '✓' : '○'}</Text><Text style={styles.body}>{label}</Text></Pressable>)}<TextInput value={comments} onChangeText={setComments} multiline placeholder="Comments or fault details" style={styles.fullInput} accessibilityLabel="Comments or fault details" />{inspectionUri && <Image source={{ uri: inspectionUri }} style={styles.uploadPreview} accessibilityLabel="Inspection photo" />}<Pressable style={styles.outline} onPress={addInspectionPhoto} accessibilityRole="button"><Text style={styles.outlineText}>Take inspection photo</Text></Pressable><Pressable style={fault ? styles.danger : styles.outline} onPress={() => setFault(!fault)} accessibilityRole="switch" accessibilityState={{ checked: fault }}><Text style={fault ? styles.dangerText : styles.outlineText}>{fault ? 'Fault will be reported' : 'Report a fault'}</Text></Pressable><Pressable style={styles.primary} onPress={submit} disabled={saving}><Text style={styles.primaryText}>{saving ? 'SUBMITTING…' : 'SUBMIT INSPECTION'}</Text></Pressable></Card></>;
 }
 
-function Tracking({ role, profile, trackingAllowed, onDuty, locationLabel, setLocationLabel, locationCoords, setLocationCoords }: { role: Role; profile: Profile | null; trackingAllowed: boolean; onDuty: boolean; locationLabel: string; setLocationLabel: (label: string) => void; locationCoords: { latitude: number; longitude: number }; setLocationCoords: (coords: { latitude: number; longitude: number }) => void }) {
+function Tracking({ role, profile, trackingAllowed, onDuty, trackingState, locationLabel, setLocationLabel, locationCoords, setLocationCoords }: { role: Role; profile: Profile | null; trackingAllowed: boolean; onDuty: boolean; trackingState: TrackingState; locationLabel: string; setLocationLabel: (label: string) => void; locationCoords: { latitude: number; longitude: number }; setLocationCoords: (coords: { latitude: number; longitude: number }) => void }) {
+  const mapRef = useRef<MapView | null>(null);
   const [drivers, setDrivers] = useState<Profile[]>([]);
   const [selectedDriverId, setSelectedDriverId] = useState<string | null>(null);
   const [driverTrackingEnabled, setDriverTrackingEnabled] = useState(true);
   const [updatingTracking, setUpdatingTracking] = useState(false);
 
   useEffect(() => {
-    if (!profile || profile.role !== 'admin') return;
+    if (!profile || profile.role === 'driver') return;
     loadActiveDrivers().then((people) => { setDrivers(people); setSelectedDriverId((current) => current ?? people[0]?.id ?? null); }).catch(() => undefined);
   }, [profile?.id]);
 
@@ -861,16 +899,23 @@ function Tracking({ role, profile, trackingAllowed, onDuty, locationLabel, setLo
     let active = true;
     loadLatestLocations().then((items: any[]) => {
       if (!active) return;
-      const target = profile.role === 'admin' && selectedDriverId ? items.find((item) => item.driver_id === selectedDriverId) : items[0];
+      const target = selectedDriverId ? items.find((item) => item.driver_id === selectedDriverId) : items[0];
       if (target) { setLocationCoords({ latitude: target.latitude, longitude: target.longitude }); setLocationLabel(`Driver • updated ${new Date(target.recorded_at).toLocaleTimeString()}`); }
       else setLocationLabel('Driver • no location received yet');
     }).catch(() => undefined);
-    return () => { active = false; };
+    const channel = subscribeToFleetLocations((item) => {
+      if (!active || (selectedDriverId && item.driver_id !== selectedDriverId)) return;
+      setLocationCoords({ latitude: item.latitude, longitude: item.longitude });
+      setLocationLabel(`Driver • updated ${new Date(item.recorded_at).toLocaleTimeString()}`);
+    });
+    return () => { active = false; void supabase?.removeChannel(channel); };
   }, [profile?.id, selectedDriverId]);
 
   useEffect(() => {
-    if (!profile || profile.role !== 'admin' || !selectedDriverId) return;
+    if (!profile || profile.role === 'driver' || !selectedDriverId) return;
     getTrackingSettings(selectedDriverId).then((setting) => setDriverTrackingEnabled(setting.enabled)).catch(() => undefined);
+    const channel = subscribeToTrackingSetting(selectedDriverId, (setting) => setDriverTrackingEnabled(setting.enabled));
+    return () => { void supabase?.removeChannel(channel); };
   }, [selectedDriverId]);
 
   const refreshLocation = async () => {
@@ -879,7 +924,7 @@ function Tracking({ role, profile, trackingAllowed, onDuty, locationLabel, setLo
     const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
     setLocationCoords({ latitude: position.coords.latitude, longitude: position.coords.longitude });
     setLocationLabel(`Driver • ${position.coords.latitude.toFixed(4)}, ${position.coords.longitude.toFixed(4)}`);
-    if (profile && trackingAllowed && onDuty && profile.role === 'driver') await saveLocation(profile.id, position.coords.latitude, position.coords.longitude);
+    if (profile && trackingAllowed && onDuty && profile.role === 'driver') await saveLocationTelemetry({ driverId: profile.id, latitude: position.coords.latitude, longitude: position.coords.longitude, accuracy: position.coords.accuracy, heading: position.coords.heading, speed: position.coords.speed, recordedAt: new Date(position.timestamp).toISOString() });
   };
 
   const confirmToggle = () => {
@@ -901,21 +946,22 @@ function Tracking({ role, profile, trackingAllowed, onDuty, locationLabel, setLo
     );
   };
 
-  const trackingIsOn = role === 'Admin' ? driverTrackingEnabled : trackingAllowed && onDuty;
+  const trackingIsOn = role !== 'Driver' ? driverTrackingEnabled : trackingAllowed && onDuty && (trackingState === 'active' || trackingState === 'foreground_only' || trackingState === 'starting');
 
   return <>
     <Text style={styles.eyebrow}>{role === 'Driver' ? 'YOUR LOCATION' : 'FLEET VISIBILITY'}</Text>
     <Text style={styles.title}>{role === 'Driver' ? 'Live tracking' : 'Driver map'}</Text>
-    {role === 'Admin' && (drivers.length > 0
+    {role !== 'Driver' && (drivers.length > 0
       ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>{drivers.map((driver) => <Pressable key={driver.id} onPress={() => setSelectedDriverId(driver.id)}><Pill tone={selectedDriverId === driver.id ? 'green' : 'blue'}>{driver.full_name || driver.email}</Pill></Pressable>)}</ScrollView>
       : <Card><Text style={styles.muted}>No active drivers yet.</Text></Card>)}
     <Card>
-      <MapView style={styles.map} region={{ ...locationCoords, latitudeDelta: 0.16, longitudeDelta: 0.16 }}><Marker coordinate={locationCoords} title="Prime Trucking USA driver" description={locationLabel} pinColor={RED} /></MapView>
+      <MapView ref={mapRef} style={styles.map} initialRegion={{ ...locationCoords, latitudeDelta: 0.16, longitudeDelta: 0.16 }}><Marker coordinate={locationCoords} title="Prime Trucking USA driver" description={locationLabel} pinColor={RED} /></MapView>
       <View style={styles.row}><View><Text style={styles.cardTitle}>{trackingIsOn ? 'Tracking is active' : 'Tracking paused'}</Text><Text style={styles.muted}>{role === 'Driver' ? (!trackingAllowed ? 'Your administrator has paused tracking for your account.' : 'Your dispatcher can see your location while you are on duty.') : locationLabel}</Text></View><Pill tone={trackingIsOn ? 'green' : 'red'}>{trackingIsOn ? 'Live' : 'Off'}</Pill></View>
     </Card>
     <Pressable style={styles.outline} onPress={() => Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${locationCoords.latitude},${locationCoords.longitude}`)} accessibilityRole="link"><Text style={styles.outlineText}>OPEN LIVE LOCATION IN GOOGLE MAPS</Text></Pressable>
     {trackingIsOn && role === 'Driver' && <Pressable style={styles.primary} onPress={refreshLocation}><Text style={styles.primaryText}>REFRESH CURRENT LOCATION</Text></Pressable>}
-    {role === 'Admin' && selectedDriverId && <Pressable style={[trackingIsOn ? styles.danger : styles.primary, updatingTracking && styles.buttonDisabled]} onPress={confirmToggle} disabled={updatingTracking}><Text style={trackingIsOn ? styles.dangerText : styles.primaryText}>{updatingTracking ? 'UPDATING…' : trackingIsOn ? 'Turn off driver tracking' : 'Turn on driver tracking'}</Text></Pressable>}
+    <Pressable style={styles.outline} onPress={() => mapRef.current?.animateToRegion({ ...locationCoords, latitudeDelta: 0.16, longitudeDelta: 0.16 }, 500)}><Text style={styles.outlineText}>RECENTER MAP</Text></Pressable>
+    {role !== 'Driver' && selectedDriverId && <Pressable style={[trackingIsOn ? styles.danger : styles.primary, updatingTracking && styles.buttonDisabled]} onPress={confirmToggle} disabled={updatingTracking}><Text style={trackingIsOn ? styles.dangerText : styles.primaryText}>{updatingTracking ? 'UPDATING…' : trackingIsOn ? 'Turn off driver tracking' : 'Turn on driver tracking'}</Text></Pressable>}
     <Text style={styles.notice}>Location is shown clearly and transparently. Admins can pause tracking when required, and every change is recorded.</Text>
   </>;
 }
@@ -1056,6 +1102,7 @@ function InviteManager() {
 }
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: MIST },
+  workspace: { flex: 1 },
   loginSafe: { flex: 1, backgroundColor: NAVY },
   loginSafeLandscape: { backgroundColor: NAVY },
   loginShell: { flex: 1 },
